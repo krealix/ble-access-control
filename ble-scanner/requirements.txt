@@ -1,0 +1,9 @@
+# ble_scanner.py + ble_generator.py: CLI-инструменты.
+# ble_app.py: GUI-обёртка вокруг тех же возможностей.
+#
+# bleak тянет за собой winrt-биндинги (winrt-windows-devices-bluetooth-advertisement),
+# которые нужны генератору для BluetoothLEAdvertisementPublisher.
+bleak>=3.0.0
+rich>=13.0.0
+customtkinter>=5.2.0
+requests>=2.32.0

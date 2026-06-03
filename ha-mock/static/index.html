@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HA Mock · Шлагбаум</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="logo-block">
+      <div class="logo-icon">🔵</div>
+      <div>
+        <div class="logo-title">HA MOCK</div>
+        <div class="logo-sub">Контроль шлагбаума</div>
+      </div>
+    </div>
+    <div class="connection" id="connection">
+      <span class="dot" id="connDot"></span>
+      <span id="connText">Соединение...</span>
+    </div>
+  </header>
+
+  <main class="grid">
+    <!-- Левая колонка: шлагбаум -->
+    <section class="card gate-card">
+      <div class="card-header">
+        <h2>Шлагбаум</h2>
+        <span class="badge" id="gateBadge">Закрыт</span>
+      </div>
+      <div class="gate-stage">
+        <svg viewBox="0 0 400 280" class="gate-svg">
+          <!-- Дорога -->
+          <rect x="0" y="220" width="400" height="60" fill="#0E1A2E"/>
+          <line x1="0" y1="250" x2="400" y2="250" stroke="#FFB74D" stroke-width="2" stroke-dasharray="20 14"/>
+
+          <!-- Опора (стойка) -->
+          <rect x="55" y="80" width="22" height="170" rx="3" fill="#1B2A44" stroke="#2D8CFF" stroke-width="2"/>
+          <rect x="48" y="76" width="36" height="10" rx="3" fill="#2D8CFF"/>
+
+          <!-- Контр-груз -->
+          <circle cx="66" cy="120" r="9" fill="#E74C5C"/>
+
+          <!-- Стрела (поворачивается) -->
+          <g id="arm" transform="rotate(0 66 120)">
+            <rect x="66" y="115" width="300" height="10" rx="2" fill="#E7ECF4"/>
+            <!-- красно-белые полосы -->
+            <rect x="80"  y="115" width="30" height="10" fill="#E74C5C"/>
+            <rect x="140" y="115" width="30" height="10" fill="#E74C5C"/>
+            <rect x="200" y="115" width="30" height="10" fill="#E74C5C"/>
+            <rect x="260" y="115" width="30" height="10" fill="#E74C5C"/>
+            <rect x="320" y="115" width="30" height="10" fill="#E74C5C"/>
+            <!-- наконечник -->
+            <rect x="362" y="113" width="6" height="14" rx="2" fill="#2D8CFF"/>
+          </g>
+
+          <!-- "Машина" подъезжает (декоративно) -->
+          <g id="car" transform="translate(280, 0)" opacity="0">
+            <rect x="0" y="195" width="80" height="30" rx="6" fill="#2D8CFF"/>
+            <rect x="10" y="180" width="55" height="18" rx="4" fill="#4FA3FF"/>
+            <circle cx="17" cy="228" r="7" fill="#0B1426" stroke="#E7ECF4" stroke-width="1.5"/>
+            <circle cx="63" cy="228" r="7" fill="#0B1426" stroke="#E7ECF4" stroke-width="1.5"/>
+          </g>
+        </svg>
+
+        <div class="gate-status">
+          <div class="status-row">
+            <span class="key">Состояние</span>
+            <span class="value" id="gateStateText">ЗАКРЫТ</span>
+          </div>
+          <div class="status-row">
+            <span class="key">Открытий сегодня</span>
+            <span class="value" id="opensCount">0</span>
+          </div>
+          <div class="status-row">
+            <span class="key">Последнее ТС</span>
+            <span class="value mono" id="lastVehicle">—</span>
+          </div>
+          <div class="status-row">
+            <span class="key">RSSI</span>
+            <span class="value mono" id="lastRssi">—</span>
+          </div>
+          <div class="status-row">
+            <span class="key">Время</span>
+            <span class="value mono" id="lastTime">—</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button class="btn primary" id="manualBtn">▶ Открыть вручную</button>
+        <button class="btn ghost" id="resetBtn">↻ Сброс</button>
+      </div>
+    </section>
+
+    <!-- Правая колонка: журнал -->
+    <section class="card log-card">
+      <div class="card-header">
+        <h2>Журнал событий</h2>
+        <span class="badge muted" id="eventsCount">0</span>
+      </div>
+      <div class="log-list" id="logList">
+        <div class="empty">Ждём события...</div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span>Webhook: <code id="webhookUrl">/api/webhook/gate_open</code></span>
+    <span class="dim">Контракт совместим с Home Assistant</span>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

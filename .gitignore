@@ -1,0 +1,26 @@
+# ── Виртуальные окружения Python ─────────────
+.venv/
+**/.venv/
+**/venv/
+__pycache__/
+*.pyc
+
+# ── Flutter / Android артефакты сборки ───────
+**/build/
+**/.dart_tool/
+**/.gradle/
+**/local.properties
+*.apk
+
+# ── Личные/рантайм-настройки ─────────────────
+**/gateway_config.json
+
+# ── Посторонние проекты (НЕ часть ВКР) ───────
+steam-bot/
+bot-game/
+pricepeek/
+hm10-emulator/
+Практика/
+
+# ── Вспомогательное ──────────────────────────
+_read_docx.py

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Справочный Info.plist. В новых проектах Xcode (13+) физического Info.plist
+  по умолчанию нет — ключи задаются во вкладке Target → Info. См. README,
+  раздел «Шаг 3: ключи Info». Этот файл нужен, только если решишь
+  использовать собственный Info.plist (тогда укажи путь в Build Settings →
+  Packaging → Info.plist File и выключи Generate Info.plist File).
+
+  NSBluetoothAlwaysUsageDescription — ОБЯЗАТЕЛЕН: без него приложение
+  падает при создании CBPeripheralManager на iOS 13+.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>Bluetooth используется для вещания BLE-метки.</string>
+
+    <!-- Необязательно. Фоновое вещание; см. в README ограничения overflow-области. -->
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>bluetooth-peripheral</string>
+    </array>
+</dict>
+</plist>
