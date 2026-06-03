@@ -25,3 +25,5 @@ hm10-emulator/
 
 # ── Вспомогательное ──────────────────────────
 _read_docx.py
+_extract.py
+diploma/_forms/
