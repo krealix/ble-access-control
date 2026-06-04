@@ -16,7 +16,7 @@
 
 ## Что готово (реализация)
 - **Ядро темы:** `ble-scanner/trajectory.py` — анализ траектории RSSI + демо-симуляция + график `trajectory_demo.png`. ✅
-- Генератор/сканер BLE-меток: десктоп `ble-scanner/ble_app.py` (Python), Android, iOS-генератор (`ble-ios-generator/`, не тестирован).
+- Генератор/сканер BLE-меток: десктоп `ble-scanner/ble_app.py` (Python), Android, iOS-генератор (`ble-ios-generator/`, не тестирован — нет Mac/iPhone; готов чеклист `ble-ios-generator/TESTING.md` для прогона, когда появится железо).
 - Шлюз с логикой RSSI: `ble-scanner/ble_gateway.py`.
 - Исполнитель (BLE→замок): Flutter-приложение `hm10_lock/` (APK на рабочем столе), модуль HM10 `OBYEZD57A1` (MAC E0:E5:CF:A2:BB:46), протокол 10 байт в FFE1.
 - Виртуальная база замков для тестов (в приложении + `ble-scanner/hm10.py`).
