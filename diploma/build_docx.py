@@ -8,11 +8,14 @@ import os
 import re
 
 from docx import Document
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Mm, Pt, RGBColor
+
+# Ширина полосы набора: A4 (210 мм) минус поля 30/10 мм
+TEXT_WIDTH_MM = 170
 
 DIPLOMA_DIR = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(DIPLOMA_DIR, "ВКР.md")
@@ -108,28 +111,54 @@ class Builder:
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
             p.paragraph_format.first_line_indent = Cm(0)
         else:
+            # Методичка: заголовки разделов и подразделов — с абзацного отступа
             p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-            p.paragraph_format.first_line_indent = Cm(1.25 if level == 1 else 0)
+            p.paragraph_format.first_line_indent = Cm(1.25)
         r = p.add_run(text)
         r.bold = True
+
+    FORMULA_RE = re.compile(r"^(.{4,}?)\s*\((\d+)\)$")
 
     def body(self, text):
         if text.startswith("- ") or text.startswith("* "):
             text = "– " + text[2:]
+        # Формула с номером: по центру, номер по правому краю (методичка, п. 5.7)
+        m = self.FORMULA_RE.match(text)
+        if m and any(ch in m.group(1) for ch in "=≥≤≈"):
+            self.formula(m.group(1).strip(), m.group(2))
+            return
         p = self.doc.add_paragraph(style="Normal")
+        if text.startswith("где "):  # расшифровка формулы — без абзацного отступа
+            p.paragraph_format.first_line_indent = Cm(0)
         add_runs(p, text)
 
-    def caption(self, text, center):
+    def formula(self, body, num):
+        p = self.doc.add_paragraph(style="Normal")
+        pf = p.paragraph_format
+        pf.first_line_indent = Cm(0)
+        pf.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        pf.tab_stops.add_tab_stop(Mm(TEXT_WIDTH_MM / 2), WD_TAB_ALIGNMENT.CENTER)
+        pf.tab_stops.add_tab_stop(Mm(TEXT_WIDTH_MM), WD_TAB_ALIGNMENT.RIGHT)
+        add_runs(p, "\t" + body + "\t(" + num + ")")
+
+    def caption(self, text, center, size=14, before=0, after=0):
         p = self.doc.add_paragraph(style="Normal")
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER if center else WD_ALIGN_PARAGRAPH.LEFT
         p.paragraph_format.first_line_indent = Cm(0)
+        p.paragraph_format.space_before = Pt(before)
+        p.paragraph_format.space_after = Pt(after)
         add_runs(p, text)
+        for r in p.runs:
+            r.font.size = Pt(size)
 
     def image(self, path):
         full = os.path.join(DIPLOMA_DIR, path)
         p = self.doc.add_paragraph(style="Normal")
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.first_line_indent = Cm(0)
+        pf = p.paragraph_format
+        pf.first_line_indent = Cm(0)
+        pf.space_before = Pt(12)
+        pf.space_after = Pt(12)
         if os.path.exists(full):
             p.add_run().add_picture(full, width=Mm(155))
         else:
@@ -146,7 +175,7 @@ class Builder:
             pf.line_spacing = 1.0
             r = p.add_run(ln if ln.strip() else " ")
             r.font.name = "Courier New"
-            r.font.size = Pt(10.5)
+            r.font.size = Pt(12)  # методичка, п. 5.11: кегль листинга 14/12/10
             set_rfonts(r._element, "Courier New")
 
     def table(self, rows):
@@ -167,6 +196,12 @@ class Builder:
                     r.font.size = Pt(12)
                     if ri == 0:
                         r.bold = True
+        # Отбивка таблицы от последующего текста (методичка: 12 пт)
+        sep = self.doc.add_paragraph(style="Normal")
+        sep.paragraph_format.line_spacing = 1.0
+        sep.paragraph_format.space_after = Pt(0)
+        r = sep.add_run(" ")
+        r.font.size = Pt(2)
 
 
 def is_table_row(line):
@@ -232,9 +267,11 @@ def parse(md, b):
         if m:
             flush(); b.image(m.group(1)); i += 1; continue
         if s.startswith("Рисунок "):
-            flush(); b.caption(s, center=True); i += 1; continue
+            # Подпись рисунка: по центру, кегль 13, отбивка 12 пт (методичка, п. 5.5)
+            flush(); b.caption(s, center=True, size=13, after=12); i += 1; continue
         if s.startswith("Таблица "):
-            flush(); b.caption(s, center=False); i += 1; continue
+            # Название таблицы: по центру, отбивка от текста 12 пт (методичка, п. 5.6)
+            flush(); b.caption(s, center=True, before=12); i += 1; continue
         if s.startswith("Листинг "):
             flush(); caption_lst = s; i += 1; continue
         if re.match(r"^\d+\.\s", s) or re.match(r"^[-*]\s", s):

@@ -243,7 +243,6 @@ def _plot(samples: list[Sample], grant_distance: float, out_png: str) -> None:
         ax1.axvspan(min(granted), max(granted), color="#22C55E", alpha=0.18,
                     label="Доступ разрешён")
     ax1.set_ylabel("RSSI, dBm")
-    ax1.set_title("Траектория изменения сигнала BLE-метки и решение о доступе")
     ax1.legend(loc="lower center", ncol=3, fontsize=9)
     ax1.grid(True, alpha=0.3)
 
