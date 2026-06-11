@@ -5,7 +5,10 @@
 - BLE-сканирование (через bleak в воркер-потоке)
 - Парсит iBeacon (Apple Manufacturer ID 0x004C)
 - Фильтрует по UUID + whitelist (имя + Major + опц. Minor + опц. MAC)
-- При совпадении RSSI ≥ порога и накоплении N подряд-замеров — POST на HA webhook
+- Решение о доступе одним из двух методов (decision_mode):
+    * "trajectory" — анализ траектории RSSI (Калман+дистанция+тренд+FSM), ядро ВКР;
+    * "threshold"  — простой порог RSSI + N замеров (базовый метод для сравнения).
+- При разрешении доступа — POST на HA webhook
 - Cooldown per-vehicle чтобы не дёргать ворота повторно
 """
 from __future__ import annotations
@@ -28,6 +31,8 @@ from bleak import BleakScanner
 
 # Переиспользуем палитру и парсер из ble_app/scanner.
 from ble_scanner import BeaconKind, parse as parse_beacon
+# Научное ядро ВКР: анализ траектории изменения RSSI.
+from trajectory import Access, TrajectoryAnalyzer, TX_POWER_1M, PATH_LOSS_N
 
 BG = "#0B1426"
 SURFACE = "#142136"
@@ -95,6 +100,19 @@ class GatewayConfig:
     samples_required: int = 2
     whitelist: list[AuthorizedVehicle] = field(default_factory=list)
 
+    # --- Режим принятия решения о доступе ---
+    # "trajectory" — по анализу траектории (Калман+дистанция+тренд+FSM), ядро ВКР;
+    # "threshold"  — по простому порогу RSSI + N замеров (для сравнения в главе 2.3).
+    decision_mode: str = "trajectory"
+
+    # Параметры анализатора траектории (используются при decision_mode="trajectory")
+    grant_distance: float = 2.0   # радиус зоны доступа, м
+    approach_samples: int = 4     # сколько подряд «приближается» нужно для доступа
+    trend_window: int = 5         # окно (замеров) для оценки тренда
+    trend_eps: float = 0.2        # порог наклона RSSI, dBm/с
+    tx_power_1m: float = TX_POWER_1M   # калиброванный RSSI на 1 м
+    path_loss_n: float = PATH_LOSS_N   # показатель затухания среды
+
     @property
     def webhook_url(self) -> str:
         base = self.ha_url.rstrip("/")
@@ -117,6 +135,13 @@ class GatewayConfig:
             cooldown_seconds=int(data.get("cooldown_seconds", 10)),
             samples_required=int(data.get("samples_required", 2)),
             whitelist=whitelist,
+            decision_mode=data.get("decision_mode", "trajectory"),
+            grant_distance=float(data.get("grant_distance", 2.0)),
+            approach_samples=int(data.get("approach_samples", 4)),
+            trend_window=int(data.get("trend_window", 5)),
+            trend_eps=float(data.get("trend_eps", 0.2)),
+            tx_power_1m=float(data.get("tx_power_1m", TX_POWER_1M)),
+            path_loss_n=float(data.get("path_loss_n", PATH_LOSS_N)),
         )
 
 
@@ -159,6 +184,10 @@ class GatewayMonitor:
         self._stop = threading.Event()
         self._hits: dict[str, list[float]] = {}
         self._cooldown: dict[str, float] = {}
+        # Анализаторы траектории per-vehicle (для decision_mode="trajectory")
+        self._analyzers: dict[str, TrajectoryAnalyzer] = {}
+        # Последнее объявленное состояние траектории — чтобы не спамить журнал
+        self._last_state: dict[str, Access] = {}
 
     @property
     def running(self) -> bool:
@@ -170,6 +199,8 @@ class GatewayMonitor:
         self._stop.clear()
         self._hits.clear()
         self._cooldown.clear()
+        self._analyzers.clear()
+        self._last_state.clear()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -181,6 +212,8 @@ class GatewayMonitor:
     def update_config(self, cfg: GatewayConfig) -> None:
         self.config = cfg
         self._hits.clear()
+        self._analyzers.clear()
+        self._last_state.clear()
 
     def _emit(self, level: str, text: str) -> None:
         self._events.put(GatewayEvent(datetime.now(), level, text))
@@ -249,9 +282,6 @@ class GatewayMonitor:
         if vehicle is None:
             return
 
-        if rssi < self.config.rssi_threshold:
-            return
-
         key = (
             f"{vehicle.name}|"
             f"{vehicle.major if vehicle.major is not None else '*'}|"
@@ -260,16 +290,26 @@ class GatewayMonitor:
         )
         now = time.time()
 
-        # Cooldown
+        # Cooldown — общий для обоих режимов
         last = self._cooldown.get(key)
         if last and (now - last) < self.config.cooldown_seconds:
             return
 
-        # Окно последних 5 секунд
+        # Решение о доступе: траектория (ядро ВКР) или простой порог.
+        if self.config.decision_mode == "trajectory":
+            self._decide_trajectory(vehicle, key, now, major, minor, rssi)
+        else:
+            self._decide_threshold(vehicle, key, now, major, minor, rssi)
+
+    def _decide_threshold(
+        self, vehicle, key: str, now: float, major: int, minor: int, rssi: int
+    ) -> None:
+        """Базовый подход для сравнения: порог RSSI + N замеров в окне 5 с."""
+        if rssi < self.config.rssi_threshold:
+            return
         window = self._hits.setdefault(key, [])
         window[:] = [t for t in window if (now - t) <= 5.0]
         window.append(now)
-
         if len(window) >= self.config.samples_required:
             self._cooldown[key] = now
             window.clear()
@@ -277,9 +317,47 @@ class GatewayMonitor:
         else:
             self._emit(
                 "info",
-                f"Кандидат: {vehicle.name} ({len(window)}/{self.config.samples_required}, "
-                f"RSSI={rssi})",
+                f"Кандидат: {vehicle.name} "
+                f"({len(window)}/{self.config.samples_required}, RSSI={rssi})",
             )
+
+    def _decide_trajectory(
+        self, vehicle, key: str, now: float, major: int, minor: int, rssi: int
+    ) -> None:
+        """Ядро ВКР: решение по траектории (Калман + дистанция + тренд + FSM).
+
+        Порог RSSI здесь НЕ применяется как фильтр — анализатору нужен полный
+        поток (включая слабые/далёкие замеры) для корректной оценки тренда.
+        """
+        analyzer = self._analyzers.get(key)
+        if analyzer is None:
+            analyzer = TrajectoryAnalyzer(
+                grant_distance=self.config.grant_distance,
+                approach_samples=self.config.approach_samples,
+                window=self.config.trend_window,
+                trend_eps=self.config.trend_eps,
+                tx_power=self.config.tx_power_1m,
+                n=self.config.path_loss_n,
+            )
+            self._analyzers[key] = analyzer
+
+        sample = analyzer.push(now, float(rssi))
+
+        # Журналируем только смену состояния — чтобы не спамить.
+        if self._last_state.get(key) != sample.state:
+            self._last_state[key] = sample.state
+            self._emit(
+                "info",
+                f"{vehicle.name}: {sample.state.value} "
+                f"(d≈{sample.distance:.1f} м, тренд={sample.trend:+.2f} dBm/с)",
+            )
+
+        if sample.state == Access.GRANTED:
+            self._cooldown[key] = now
+            # Сброс анализатора: после cooldown снова потребуется устойчивый подход.
+            self._analyzers.pop(key, None)
+            self._last_state.pop(key, None)
+            self._fire(vehicle, major, minor, rssi)
 
     def _find_vehicle(
         self, major: int, minor: int, mac: str
@@ -405,6 +483,36 @@ class GatewayPanel(ctk.CTkFrame):
             anchor="w",
         ).pack(fill="x", padx=14, pady=(12, 4))
 
+        # --- Режим принятия решения о доступе ---
+        ctk.CTkLabel(
+            parent, text="РЕЖИМ РЕШЕНИЯ", text_color=MUTED,
+            font=ctk.CTkFont(size=10, weight="bold"), anchor="w",
+        ).pack(fill="x", padx=14, pady=(4, 2))
+        self._decision_mode = self._config.decision_mode
+        mode_row = ctk.CTkFrame(parent, fg_color=BG, corner_radius=10)
+        mode_row.pack(fill="x", padx=14, pady=(0, 2))
+        self._mode_btns: dict[str, ctk.CTkButton] = {}
+        for i, (val, label) in enumerate([
+            ("trajectory", "Траектория"),
+            ("threshold", "Порог RSSI"),
+        ]):
+            b = ctk.CTkButton(
+                mode_row, text=label, height=32, corner_radius=8,
+                font=ctk.CTkFont(size=12, weight="bold"),
+                fg_color="transparent", hover_color=SURFACE_HI, text_color=MUTED,
+                command=lambda v=val: self._set_decision_mode(v),
+            )
+            b.grid(row=0, column=i, sticky="ew", padx=2, pady=2)
+            mode_row.grid_columnconfigure(i, weight=1)
+            self._mode_btns[val] = b
+        self._mode_hint = ctk.CTkLabel(
+            parent, text="", text_color=MUTED,
+            font=ctk.CTkFont(size=10), anchor="w",
+            wraplength=440, justify="left",
+        )
+        self._mode_hint.pack(fill="x", padx=14, pady=(2, 6))
+        self._set_decision_mode(self._decision_mode)
+
         self._entry_ha_url = self._labelled(
             parent, "Home Assistant URL",
             "http://192.168.0.10:8123", self._config.ha_url,
@@ -446,6 +554,26 @@ class GatewayPanel(ctk.CTkFrame):
             corner_radius=10,
             command=self._save,
         ).pack(fill="x", padx=14, pady=(8, 14))
+
+    def _set_decision_mode(self, mode: str) -> None:
+        self._decision_mode = mode
+        for val, btn in self._mode_btns.items():
+            if val == mode:
+                btn.configure(fg_color=PRIMARY, hover_color=PRIMARY_HOVER,
+                              text_color="white")
+            else:
+                btn.configure(fg_color="transparent", hover_color=SURFACE_HI,
+                              text_color=MUTED)
+        if mode == "trajectory":
+            self._mode_hint.configure(
+                text="Доступ — по устойчивому приближению метки "
+                     "(Калман + дистанция + тренд). Порог RSSI игнорируется."
+            )
+        else:
+            self._mode_hint.configure(
+                text="Доступ — по простому порогу RSSI и N замерам "
+                     "(базовый метод для сравнения)."
+            )
 
     def _labelled(
         self,
@@ -618,6 +746,14 @@ class GatewayPanel(ctk.CTkFrame):
             cooldown_seconds=self._safe_int(self._entry_cooldown.get(), 10),
             samples_required=self._safe_int(self._entry_samples.get(), 2),
             whitelist=list(self._config.whitelist),
+            # Режим решения из переключателя; параметры траектории — из текущего конфига.
+            decision_mode=self._decision_mode,
+            grant_distance=self._config.grant_distance,
+            approach_samples=self._config.approach_samples,
+            trend_window=self._config.trend_window,
+            trend_eps=self._config.trend_eps,
+            tx_power_1m=self._config.tx_power_1m,
+            path_loss_n=self._config.path_loss_n,
         )
         save_config(cfg)
         self._config = cfg
