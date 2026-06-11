@@ -1,0 +1,31 @@
+name: ble_beacon_app
+description: "BLE Beacon Generator and Scanner."
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.11.5
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+  flutter_blue_plus: ^1.32.12
+  flutter_ble_peripheral: ^2.1.0
+  permission_handler: ^11.3.1
+  shared_preferences: ^2.3.3
+  uuid: ^4.5.1
+  crypto: ^3.0.5
+  http: ^1.2.2
+  wakelock_plus: ^1.2.8
+  mqtt_client: ^10.5.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
