@@ -50,4 +50,26 @@ class BtInfo {
       return false;
     }
   }
+
+  /// Возможности адаптера по вещанию (для диагностики ошибок ADVERTISE_FAILED).
+  static Future<Map<String, dynamic>> advertiseSupport() async {
+    try {
+      final res =
+          await _channel.invokeMapMethod<String, dynamic>('getAdvertiseSupport');
+      return res ?? {};
+    } catch (_) {
+      return {};
+    }
+  }
+
+  /// Короткая сводка поддержки вещания для показа в UI.
+  static Future<String> advertiseSupportSummary() async {
+    final s = await advertiseSupport();
+    if (s.isEmpty) return 'нет данных';
+    String yn(Object? v) => v == true ? 'да' : 'нет';
+    return 'BT вкл: ${yn(s["enabled"])}; '
+        'multi-adv: ${yn(s["multipleAdvertisement"])}; '
+        'advertiser: ${yn(s["advertiserNotNull"])}; '
+        'ext-adv: ${yn(s["leExtendedAdvertising"])}';
+  }
 }

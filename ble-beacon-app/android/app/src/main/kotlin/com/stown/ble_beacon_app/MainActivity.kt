@@ -43,6 +43,25 @@ class MainActivity : FlutterActivity() {
                             result.error("BT_NAME_ERROR", e.message, null)
                         }
                     }
+                    "getAdvertiseSupport" -> {
+                        try {
+                            val a = btAdapter()
+                            val map = HashMap<String, Any?>()
+                            map["enabled"] = a?.isEnabled ?: false
+                            map["multipleAdvertisement"] =
+                                a?.isMultipleAdvertisementSupported ?: false
+                            map["advertiserNotNull"] =
+                                (a?.bluetoothLeAdvertiser != null)
+                            if (android.os.Build.VERSION.SDK_INT >=
+                                    android.os.Build.VERSION_CODES.O) {
+                                map["leExtendedAdvertising"] =
+                                    a?.isLeExtendedAdvertisingSupported ?: false
+                            }
+                            result.success(map)
+                        } catch (e: Throwable) {
+                            result.error("BT_SUPPORT_ERROR", e.message, null)
+                        }
+                    }
                     else -> result.notImplemented()
                 }
             }

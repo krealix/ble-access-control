@@ -173,13 +173,41 @@ class _GeneratorScreenState extends State<GeneratorScreen> {
         return;
       }
       if (mounted) setState(() => _advertising = true);
+      if (_advertiser.lastNameDropped) {
+        _snack('Метка вещается, но без имени — телефон не поддержал имя в пакете');
+      }
     } on ArgumentError catch (e) {
       _snack(e.message?.toString() ?? 'Некорректные параметры');
     } on PlatformException catch (e) {
-      _snack('Платформенная ошибка: ${e.message ?? e.code}');
+      await _showAdvertiseError('код ${e.code} — ${e.message ?? ""}');
     } catch (e) {
-      _snack('Ошибка: $e');
+      await _showAdvertiseError('$e');
     }
+  }
+
+  /// Подробная диагностика ошибки вещания: код + возможности адаптера.
+  Future<void> _showAdvertiseError(String detail) async {
+    final support = await BtInfo.advertiseSupportSummary();
+    if (!mounted) return;
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surfaceElevated,
+        title: const Text('Ошибка вещания',
+            style: TextStyle(color: AppColors.onSurface)),
+        content: SelectableText(
+          'ADVERTISE_FAILED: $detail\n\nПоддержка адаптера:\n$support',
+          style: const TextStyle(
+              color: AppColors.onSurface, fontFamily: 'monospace', fontSize: 13),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
   }
 
   void _snack(String msg) {

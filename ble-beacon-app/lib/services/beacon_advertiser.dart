@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 
+import 'package:flutter/services.dart';
 import 'package:flutter_ble_peripheral/flutter_ble_peripheral.dart';
 
 import '../models/beacon.dart';
@@ -21,11 +22,17 @@ class BeaconAdvertiser {
   bool _advertising = false;
   String? _originalBtName;
 
+  /// true, если последний запуск прошёл, но имя пришлось убрать из эфира
+  /// (телефон отказался вещать пакет с именем).
+  bool _nameDropped = false;
+  bool get lastNameDropped => _nameDropped;
+
   bool get isAdvertising => _advertising;
 
   Future<bool> isSupported() => _peripheral.isSupported;
 
   Future<BluetoothPeripheralState> start(BeaconPreset preset) async {
+    _nameDropped = false;
     // Имя метки: для iBeacon не влезает в пакет. На Android имя в рекламе —
     // это имя BT-адаптера: задаём перед стартом, восстанавливаем на stop.
     final name = _safeName(preset.advName);
@@ -34,10 +41,22 @@ class BeaconAdvertiser {
       await BtInfo.setBluetoothName(name);
       await Future.delayed(const Duration(milliseconds: 350));
     }
-    final data = _build(preset);
-    final state = await _peripheral.start(advertiseData: data);
-    _advertising = true;
-    return state;
+    try {
+      final data = _build(preset);
+      final state = await _peripheral.start(advertiseData: data);
+      _advertising = true;
+      return state;
+    } on PlatformException {
+      // Имя в эфире — частая причина отказа вещания на отдельных прошивках
+      // (вендорский код → "UNDOCUMENTED"). Повторяем без имени, чтобы метка
+      // всё равно вышла в эфир.
+      if (name == null || preset.kind == BeaconKind.iBeacon) rethrow;
+      final data = _build(preset, dropName: true);
+      final state = await _peripheral.start(advertiseData: data);
+      _advertising = true;
+      _nameDropped = true;
+      return state;
+    }
   }
 
   Future<void> stop() async {
@@ -55,8 +74,8 @@ class BeaconAdvertiser {
     return n.length > _kMaxAdvName ? n.substring(0, _kMaxAdvName) : n;
   }
 
-  AdvertiseData _build(BeaconPreset p) {
-    final name = _safeName(p.advName);
+  AdvertiseData _build(BeaconPreset p, {bool dropName = false}) {
+    final name = dropName ? null : _safeName(p.advName);
     final hasName = name != null;
     switch (p.kind) {
       case BeaconKind.iBeacon:

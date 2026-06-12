@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 
+import 'package:flutter/services.dart';
 import 'package:flutter_ble_peripheral/flutter_ble_peripheral.dart';
 
 import '../models/stown_packet.dart';
@@ -25,6 +26,11 @@ class StownAdvertiser {
   bool _advertising = false;
   bool get isAdvertising => _advertising;
 
+  /// true, если последний запуск прошёл, но имя пришлось убрать из эфира
+  /// (телефон отказался вещать пакет с именем). Метка работает, но без имени.
+  bool _nameDropped = false;
+  bool get lastNameDropped => _nameDropped;
+
   /// Имя BT-адаптера до того как мы его подменили (для восстановления на stop).
   String? _originalBtName;
 
@@ -34,6 +40,7 @@ class StownAdvertiser {
     Uint8List packet,
     StownConfig config,
   ) async {
+    _nameDropped = false;
     final name = _safeName(config.tagName);
     // Имя метки работает только для manufacturer/service (в iBeacon пакет полон).
     // На Android имя в рекламе = имя BT-адаптера: задаём его перед стартом и
@@ -45,10 +52,22 @@ class StownAdvertiser {
       await Future.delayed(const Duration(milliseconds: 350));
     }
 
-    final data = _build(packet, config);
-    final state = await _peripheral.start(advertiseData: data);
-    _advertising = true;
-    return state;
+    try {
+      final data = _build(packet, config);
+      final state = await _peripheral.start(advertiseData: data);
+      _advertising = true;
+      return state;
+    } on PlatformException {
+      // Имя (= имя адаптера в эфире) — самый частый источник отказа вещания
+      // на отдельных прошивках (вендорский код → "UNDOCUMENTED"). Чтобы метка
+      // всё равно вышла в эфир и шлагбаум открывался, повторяем без имени.
+      if (name == null || config.wrapper == WrapperFormat.ibeacon) rethrow;
+      final data = _build(packet, config, dropName: true);
+      final state = await _peripheral.start(advertiseData: data);
+      _advertising = true;
+      _nameDropped = true;
+      return state;
+    }
   }
 
   Future<void> stop() async {
@@ -68,11 +87,13 @@ class StownAdvertiser {
     return n.length > kMaxTagNameLen ? n.substring(0, kMaxTagNameLen) : n;
   }
 
-  AdvertiseData _build(Uint8List packet, StownConfig config) {
+  AdvertiseData _build(Uint8List packet, StownConfig config,
+      {bool dropName = false}) {
     // Имя метки влезает только у manufacturer/service — у iBeacon пакет
     // уже заполнен (UUID+Major+Minor). На Android транслируется имя адаптера
     // (мы задали его в start), поэтому includeDeviceName=true.
-    final name = _safeName(config.tagName);
+    // dropName=true — аварийный режим без имени (если телефон отказался вещать).
+    final name = dropName ? null : _safeName(config.tagName);
     final hasName = name != null;
 
     switch (config.wrapper) {
