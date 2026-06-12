@@ -42,6 +42,7 @@ class _StownScreenState extends State<StownScreen> {
   String? _selectedName;
   final List<String> _sendLog = [];
 
+  final _cmdCtrl = TextEditingController();
   final _idCtrl = TextEditingController();
   final _companyCtrl = TextEditingController();
   final _serviceCtrl = TextEditingController();
@@ -57,6 +58,7 @@ class _StownScreenState extends State<StownScreen> {
   void dispose() {
     _scanSub?.cancel();
     _sender.stopScan();
+    _cmdCtrl.dispose();
     _idCtrl.dispose();
     _companyCtrl.dispose();
     _serviceCtrl.dispose();
@@ -69,6 +71,7 @@ class _StownScreenState extends State<StownScreen> {
     if (!mounted) return;
     setState(() {
       _config = cfg;
+      _cmdCtrl.text = _hex2(cfg.command);
       _idCtrl.text = cfg.identifierValueFor(cfg.identifierMode);
       _companyCtrl.text = '0x${cfg.companyId.toRadixString(16).padLeft(4, '0').toUpperCase()}';
       _serviceCtrl.text = cfg.serviceUuid;
@@ -561,14 +564,104 @@ class _StownScreenState extends State<StownScreen> {
         children: [
           const SectionLabel('Команда (первый байт)'),
           const SizedBox(height: 8),
-          _segment<int>(
-            options: const {kCmdOpen87: '0x87', kCmdOpen01: '0x01'},
-            value: _config.command,
-            onChanged: (v) => setState(() => _config = _config.copyWith(command: v)),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              // Свободный ввод байта в hex (00–FF).
+              SizedBox(
+                width: 104,
+                child: TextField(
+                  controller: _cmdCtrl,
+                  enabled: !_advertising,
+                  textCapitalization: TextCapitalization.characters,
+                  inputFormatters: [
+                    FilteringTextInputFormatter.allow(RegExp('[0-9a-fA-F]')),
+                    LengthLimitingTextInputFormatter(2),
+                  ],
+                  onChanged: _onCommandHexChanged,
+                  style: const TextStyle(
+                    color: AppColors.onSurface,
+                    fontFamily: 'monospace',
+                    fontSize: 18,
+                    letterSpacing: 3,
+                  ),
+                  decoration: const InputDecoration(
+                    labelText: 'HEX',
+                    prefixText: '0x',
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              // Быстрые пресеты стандартных команд STOWN.
+              Expanded(
+                child: Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  alignment: WrapAlignment.end,
+                  children: [
+                    _cmdPreset(kCmdOpen87),
+                    _cmdPreset(kCmdOpen01),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            'Любой байт 00–FF. Стандарт STOWN: 87 или 01. '
+            'Свой код поймёт только настоящий контроллер.',
+            style: TextStyle(
+              color: AppColors.onSurfaceMuted,
+              fontSize: 11,
+              height: 1.4,
+            ),
           ),
         ],
       ),
     );
+  }
+
+  /// Кнопка-пресет команды (подсвечивается, если совпадает с текущим байтом).
+  Widget _cmdPreset(int value) {
+    final selected = _config.command == value;
+    return GestureDetector(
+      onTap: _advertising ? null : () => _setCommand(value),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        decoration: BoxDecoration(
+          gradient: selected ? primaryGradient : null,
+          color: selected ? null : AppColors.surfaceDim,
+          borderRadius: BorderRadius.circular(9),
+        ),
+        child: Text(
+          '0x${_hex2(value)}',
+          style: TextStyle(
+            color: selected ? Colors.white : AppColors.onSurfaceMuted,
+            fontWeight: FontWeight.w600,
+            fontSize: 13,
+            fontFamily: 'monospace',
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Байт → две заглавные hex-цифры ('87').
+  String _hex2(int b) => b.toRadixString(16).padLeft(2, '0').toUpperCase();
+
+  /// Ручной ввод hex: парсим и кладём в config (пустое/некорректное игнорируем).
+  void _onCommandHexChanged(String s) {
+    final v = int.tryParse(s.trim(), radix: 16);
+    if (v == null) return;
+    setState(() => _config = _config.copyWith(command: v & 0xFF));
+  }
+
+  /// Выбор пресета: пишем и в config, и в поле ввода.
+  void _setCommand(int value) {
+    setState(() {
+      _config = _config.copyWith(command: value);
+      _cmdCtrl.text = _hex2(value);
+    });
   }
 
   Widget _identifierCard() {
