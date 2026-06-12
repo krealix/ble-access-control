@@ -235,6 +235,7 @@ class _GatewayScreenState extends State<GatewayScreen> {
         text: existing?.major?.toString() ?? '');
     final minorCtrl = TextEditingController(
         text: existing?.minor?.toString() ?? '');
+    final stownIdCtrl = TextEditingController(text: existing?.stownId ?? '');
     String? error;
 
     final result = await showDialog<Object?>(
@@ -335,6 +336,21 @@ class _GatewayScreenState extends State<GatewayScreen> {
                     ),
                   ],
                 ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: stownIdCtrl,
+                  style: const TextStyle(
+                      color: AppColors.onSurface, fontFamily: 'monospace'),
+                  decoration: const InputDecoration(
+                    labelText: 'STOWN ID (опционально)',
+                    prefixIcon: Icon(Icons.sensors),
+                    helperText:
+                        'Идентификатор STOWN-метки (14 hex). Скопируйте поле ID из вкладки «Сканер». Работает в любой обёртке.',
+                    helperStyle: TextStyle(
+                        color: AppColors.onSurfaceMuted, fontSize: 11),
+                    helperMaxLines: 3,
+                  ),
+                ),
                 if (error != null) ...[
                   const SizedBox(height: 8),
                   Text(error!,
@@ -402,12 +418,24 @@ class _GatewayScreenState extends State<GatewayScreen> {
                     return;
                   }
                 }
+                final stownId = stownIdCtrl.text.trim().isEmpty
+                    ? null
+                    : stownIdCtrl.text.trim();
+                if (stownId != null) {
+                  final n = normalizeId(stownId);
+                  if (n.length != 14 ||
+                      !RegExp(r'^[0-9A-F]+$').hasMatch(n)) {
+                    setLocal(() => error = 'STOWN ID: 14 hex-символов (7 байт)');
+                    return;
+                  }
+                }
                 if (uuid == null &&
                     mac == null &&
                     major == null &&
-                    minor == null) {
+                    minor == null &&
+                    stownId == null) {
                   setLocal(() => error =
-                      'Заполните хотя бы один идентификатор: UUID, MAC, Major или Minor');
+                      'Заполните хотя бы один идентификатор: UUID, MAC, Major, Minor или STOWN ID');
                   return;
                 }
                 Navigator.pop(
@@ -418,6 +446,7 @@ class _GatewayScreenState extends State<GatewayScreen> {
                     macAddress: mac,
                     major: major,
                     minor: minor,
+                    stownId: stownId,
                   ),
                 );
               },

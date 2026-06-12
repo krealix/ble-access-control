@@ -138,8 +138,8 @@ ParsedBeacon parseAdvertisement(ScanResult r) {
   );
 }
 
-/// Ищет 10-байтный STOWN-пакет в manufacturer/service data.
-Map<String, String>? _parseStown(AdvertisementData adv) {
+/// Декодирует 10-байтный STOWN-пакет из manufacturer/service data рекламы.
+DecodedPacket? decodeStownFromAdv(AdvertisementData adv) {
   final candidates = <List<int>>[];
   for (final entry in adv.manufacturerData.entries) {
     if (entry.key == _appleMfrId) continue; // там iBeacon
@@ -151,14 +151,24 @@ Map<String, String>? _parseStown(AdvertisementData adv) {
   for (final data in candidates) {
     if (StownPacket.looksLikeStown(data)) {
       final dp = StownPacket.decode(data);
-      if (dp != null) {
-        return {
-          'Cmd': dp.commandHex,
-          'ID': dp.identifierHex,
-          'Замок': dp.lockHex,
-        };
-      }
+      if (dp != null) return dp;
     }
   }
   return null;
+}
+
+/// Идентификатор STOWN-метки (hex 7 байт) из рекламы, либо null. Используется
+/// шлюзом для сверки с белым списком по полю ID.
+String? stownIdFromAdv(AdvertisementData adv) =>
+    decodeStownFromAdv(adv)?.identifierHex;
+
+/// Ищет 10-байтный STOWN-пакет в manufacturer/service data.
+Map<String, String>? _parseStown(AdvertisementData adv) {
+  final dp = decodeStownFromAdv(adv);
+  if (dp == null) return null;
+  return {
+    'Cmd': dp.commandHex,
+    'ID': dp.identifierHex,
+    'Замок': dp.lockHex,
+  };
 }

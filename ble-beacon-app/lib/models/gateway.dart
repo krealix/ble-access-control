@@ -14,6 +14,16 @@ String normalizeMac(String? s) {
       .replaceAll(' ', '');
 }
 
+/// Нормализованный STOWN-идентификатор (hex, 7 байт) — uppercase, без разделителей.
+String normalizeId(String? s) {
+  if (s == null) return '';
+  return s
+      .toUpperCase()
+      .replaceAll(':', '')
+      .replaceAll('-', '')
+      .replaceAll(' ', '');
+}
+
 /// Запись из белого списка авторизованных машин.
 ///
 /// Все идентификационные поля опциональны. Используется OR-матчинг:
@@ -25,6 +35,7 @@ class AuthorizedVehicle {
     this.macAddress,
     this.major,
     this.minor,
+    this.stownId,
   });
 
   final String name;
@@ -33,12 +44,17 @@ class AuthorizedVehicle {
   final int? major;
   final int? minor;
 
+  /// Идентификатор STOWN-метки (hex 7 байт) — сверяется напрямую с полем ID
+  /// 10-байтного пакета, в любой обёртке (manufacturer/service/iBeacon).
+  final String? stownId;
+
   /// Хотя бы одно поле идентификации заполнено.
   bool get isValid =>
       (uuid != null && uuid!.isNotEmpty) ||
       (macAddress != null && macAddress!.isNotEmpty) ||
       major != null ||
-      minor != null;
+      minor != null ||
+      (stownId != null && stownId!.isNotEmpty);
 
   /// OR-матчинг: возвращает true если хотя бы одно непустое поле
   /// совпадает с соответствующим полем рекламы.
@@ -47,6 +63,7 @@ class AuthorizedVehicle {
     String? advMac,
     int? advMajor,
     int? advMinor,
+    String? advStownId,
   }) {
     if (uuid != null && uuid!.isNotEmpty) {
       if (advUuid != null && normalizeUuid(uuid) == normalizeUuid(advUuid)) {
@@ -64,6 +81,11 @@ class AuthorizedVehicle {
     if (minor != null && advMinor != null && minor == advMinor) {
       return true;
     }
+    if (stownId != null && stownId!.isNotEmpty) {
+      if (advStownId != null && normalizeId(stownId) == normalizeId(advStownId)) {
+        return true;
+      }
+    }
     return false;
   }
 
@@ -73,6 +95,7 @@ class AuthorizedVehicle {
     String? advMac,
     int? advMajor,
     int? advMinor,
+    String? advStownId,
   }) {
     final matched = <String>[];
     if (uuid != null &&
@@ -93,6 +116,12 @@ class AuthorizedVehicle {
     if (minor != null && advMinor != null && minor == advMinor) {
       matched.add('Minor=$advMinor');
     }
+    if (stownId != null &&
+        stownId!.isNotEmpty &&
+        advStownId != null &&
+        normalizeId(stownId) == normalizeId(advStownId)) {
+      matched.add('ID');
+    }
     return matched.isEmpty ? '—' : matched.join(' + ');
   }
 
@@ -108,6 +137,7 @@ class AuthorizedVehicle {
     }
     if (major != null) parts.add('Major=$major');
     if (minor != null) parts.add('Minor=$minor');
+    if (stownId != null && stownId!.isNotEmpty) parts.add('ID=$stownId');
     return parts.isEmpty ? '(пусто)' : parts.join('  ');
   }
 
@@ -117,6 +147,7 @@ class AuthorizedVehicle {
         if (macAddress != null) 'macAddress': macAddress,
         if (major != null) 'major': major,
         if (minor != null) 'minor': minor,
+        if (stownId != null) 'stownId': stownId,
       };
 
   static AuthorizedVehicle fromJson(Map<String, dynamic> j) {
@@ -126,6 +157,7 @@ class AuthorizedVehicle {
       macAddress: j['macAddress'] as String?,
       major: j['major'] as int?,
       minor: j['minor'] as int?,
+      stownId: j['stownId'] as String?,
     );
   }
 }

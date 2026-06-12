@@ -10,6 +10,7 @@ import 'package:mqtt_client/mqtt_server_client.dart';
 
 import '../models/beacon.dart';
 import '../models/gateway.dart';
+import 'beacon_parser.dart';
 
 /// Сервис мониторинга у шлагбаума: сканирует BLE, проверяет авторизацию,
 /// отправляет сигнал в выбранном транспорте (HTTP / TCP / MQTT).
@@ -104,6 +105,9 @@ class GatewayMonitor {
       advMinor = (apple[20] << 8) | apple[21];
     }
 
+    // STOWN-идентификатор из 10-байтного пакета (любая обёртка, кроме iBeacon).
+    final advStownId = stownIdFromAdv(r.advertisementData);
+
     final rssi = r.rssi;
 
     AuthorizedVehicle? vehicle;
@@ -114,6 +118,7 @@ class GatewayMonitor {
         advMac: advMac,
         advMajor: advMajor,
         advMinor: advMinor,
+        advStownId: advStownId,
       )) {
         vehicle = v;
         break;
@@ -137,7 +142,7 @@ class GatewayMonitor {
     window.add(now);
 
     if (window.length >= config.samplesRequired) {
-      _trigger(vehicle, advUuid, advMac, advMajor, advMinor, rssi);
+      _trigger(vehicle, advUuid, advMac, advMajor, advMinor, advStownId, rssi);
       _lastTrigger[key] = now;
       window.clear();
     } else {
@@ -155,6 +160,7 @@ class GatewayMonitor {
     String advMac,
     int? advMajor,
     int? advMinor,
+    String? advStownId,
     int rssi,
   ) async {
     final matchedFields = vehicle.explainMatch(
@@ -162,6 +168,7 @@ class GatewayMonitor {
       advMac: advMac,
       advMajor: advMajor,
       advMinor: advMinor,
+      advStownId: advStownId,
     );
     _emit(
       EventLevel.success,
@@ -174,6 +181,7 @@ class GatewayMonitor {
       'mac': advMac,
       'major': advMajor,
       'minor': advMinor,
+      'stownId': advStownId,
       'rssi': rssi,
       'timestamp': DateTime.now().toIso8601String(),
     };
