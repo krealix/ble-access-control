@@ -57,7 +57,7 @@ ThemeData buildAppTheme() {
       filled: true,
       fillColor: AppColors.surface,
       labelStyle: const TextStyle(color: AppColors.onSurfaceMuted, fontSize: 12),
-      floatingLabelStyle: const TextStyle(color: AppColors.primary),
+      floatingLabelStyle: const TextStyle(color: AppColors.primaryLight),
       hintStyle: const TextStyle(color: AppColors.onSurfaceMuted),
       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
       border: OutlineInputBorder(

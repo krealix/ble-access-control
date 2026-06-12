@@ -265,7 +265,7 @@ class _GatewayScreenState extends State<GatewayScreen> {
                   autofocus: true,
                   style: const TextStyle(color: AppColors.onSurface),
                   decoration: const InputDecoration(
-                    labelText: 'Имя водителя / ТС',
+                    labelText: 'Имя ТС',
                     prefixIcon: Icon(Icons.person_outline),
                     helperText: 'Отображается в журнале и в HA. Обязательно.',
                     helperStyle: TextStyle(
@@ -279,7 +279,7 @@ class _GatewayScreenState extends State<GatewayScreen> {
                   style: const TextStyle(
                       color: AppColors.onSurface, fontFamily: 'monospace'),
                   decoration: const InputDecoration(
-                    labelText: 'UUID (опционально)',
+                    labelText: 'UUID',
                     prefixIcon: Icon(Icons.fingerprint),
                     helperText:
                         'Для iBeacon. С дефисами или без — нормализуется.',
@@ -294,7 +294,7 @@ class _GatewayScreenState extends State<GatewayScreen> {
                   style: const TextStyle(
                       color: AppColors.onSurface, fontFamily: 'monospace'),
                   decoration: const InputDecoration(
-                    labelText: 'MAC адрес (опционально)',
+                    labelText: 'MAC-адрес',
                     prefixIcon: Icon(Icons.qr_code_2),
                     helperText:
                         'Стабилен только для ESP32/железа. На Android рандомизируется.',
@@ -315,7 +315,7 @@ class _GatewayScreenState extends State<GatewayScreen> {
                             color: AppColors.onSurface,
                             fontFamily: 'monospace'),
                         decoration: const InputDecoration(
-                          labelText: 'Major (опц.)',
+                          labelText: 'Major',
                           prefixIcon: Icon(Icons.tag),
                         ),
                       ),
@@ -329,7 +329,7 @@ class _GatewayScreenState extends State<GatewayScreen> {
                             color: AppColors.onSurface,
                             fontFamily: 'monospace'),
                         decoration: const InputDecoration(
-                          labelText: 'Minor (опц.)',
+                          labelText: 'Minor',
                           prefixIcon: Icon(Icons.tag),
                         ),
                       ),
@@ -342,7 +342,7 @@ class _GatewayScreenState extends State<GatewayScreen> {
                   style: const TextStyle(
                       color: AppColors.onSurface, fontFamily: 'monospace'),
                   decoration: const InputDecoration(
-                    labelText: 'STOWN ID (опционально)',
+                    labelText: 'STOWN ID',
                     prefixIcon: Icon(Icons.sensors),
                     helperText:
                         'Идентификатор STOWN-метки (14 hex). Скопируйте поле ID из вкладки «Сканер». Работает в любой обёртке.',
@@ -611,9 +611,8 @@ class _GatewayScreenState extends State<GatewayScreen> {
               Expanded(
                 child: _textField(
                   _rssiCtrl,
-                  'RSSI порог',
+                  'RSSI',
                   hint: '-65 dBm ≈ 5–10 м',
-                  icon: Icons.signal_cellular_alt,
                   numeric: true,
                   allowNegative: true,
                 ),
@@ -624,7 +623,6 @@ class _GatewayScreenState extends State<GatewayScreen> {
                   _cooldownCtrl,
                   'Cooldown',
                   hint: 'сек до повтора',
-                  icon: Icons.hourglass_empty,
                   numeric: true,
                 ),
               ),
@@ -634,7 +632,6 @@ class _GatewayScreenState extends State<GatewayScreen> {
                   _samplesCtrl,
                   'Samples',
                   hint: 'для anti-flicker',
-                  icon: Icons.repeat,
                   numeric: true,
                 ),
               ),
@@ -708,8 +705,8 @@ class _GatewayScreenState extends State<GatewayScreen> {
         return [
           _textField(
             _haUrlCtrl,
-            'Home Assistant URL',
-            hint: 'Локальный адрес HA, напр. http://192.168.0.10:8123',
+            'Адрес HA',
+            hint: 'Локальный адрес Home Assistant, напр. http://192.168.0.10:8123',
             icon: Icons.home_outlined,
           ),
           const SizedBox(height: 12),
@@ -759,7 +756,7 @@ class _GatewayScreenState extends State<GatewayScreen> {
           const SizedBox(height: 12),
           _textField(
             _tcpTemplateCtrl,
-            'Шаблон / payload',
+            'Шаблон',
             hint: _tcpFormat == TcpPayloadFormat.json
                 ? 'Не используется — отправляется JSON'
                 : (_tcpFormat == TcpPayloadFormat.text
