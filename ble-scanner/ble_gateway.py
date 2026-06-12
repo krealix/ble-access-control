@@ -3,8 +3,8 @@
 Эквивалент вкладки «Шлюз» в Flutter-приложении, только на Windows.
 
 - BLE-сканирование (через bleak в воркер-потоке)
-- Парсит iBeacon (Apple Manufacturer ID 0x004C)
-- Фильтрует по UUID + whitelist (имя + Major + опц. Minor + опц. MAC)
+- Парсит iBeacon (Apple Manufacturer ID 0x004C) и 10-байтный STOWN-пакет
+- Фильтрует по whitelist (имя + Major + опц. Minor + опц. MAC + опц. STOWN ID)
 - Решение о доступе одним из двух методов (decision_mode):
     * "trajectory" — анализ траектории RSSI (Калман+дистанция+тренд+FSM), ядро ВКР;
     * "threshold"  — простой порог RSSI + N замеров (базовый метод для сравнения).
@@ -69,17 +69,34 @@ def normalize_mac(s: Optional[str]) -> Optional[str]:
     return cleaned
 
 
+def normalize_id(s: Optional[str]) -> str:
+    """Нормализует STOWN-идентификатор (hex): uppercase, без разделителей."""
+    if not s:
+        return ""
+    return s.strip().upper().replace(":", "").replace("-", "").replace(" ", "")
+
+
 @dataclass
 class AuthorizedVehicle:
     name: str
     major: Optional[int] = None
     minor: Optional[int] = None
     mac: Optional[str] = None
+    # Идентификатор STOWN-метки (hex, 7 байт) — сверяется напрямую с полем ID
+    # 10-байтного пакета в любой обёртке (manufacturer/service/iBeacon).
+    stown_id: Optional[str] = None
 
-    def matches(self, major: int, minor: int, mac: str) -> bool:
+    def matches(
+        self,
+        major: Optional[int],
+        minor: Optional[int],
+        mac: str,
+        stown_id: Optional[str] = None,
+    ) -> bool:
         # Должен быть задан хотя бы один идентифицирующий признак,
         # иначе матчер сработает на любую метку и потеряет смысл.
-        if self.major is None and self.minor is None and self.mac is None:
+        if (self.major is None and self.minor is None and self.mac is None
+                and self.stown_id is None):
             return False
         if self.major is not None and self.major != major:
             return False
@@ -87,7 +104,33 @@ class AuthorizedVehicle:
             return False
         if self.mac is not None and self.mac.upper() != (mac or "").upper():
             return False
+        if self.stown_id is not None and \
+                normalize_id(self.stown_id) != normalize_id(stown_id):
+            return False
         return True
+
+
+# Команды открытия STOWN (первый байт 10-байтного пакета).
+_STOWN_CMDS = (0x87, 0x01)
+
+
+def decode_stown_id(adv) -> Optional[str]:
+    """Возвращает идентификатор STOWN-метки (hex, 7 байт) из рекламы, либо None.
+
+    Ищет 10-байтный пакет [cmd][id×7][lock×2] в manufacturer data (кроме Apple)
+    и в service data; идентификатор — байты 1..7.
+    """
+    candidates: list[bytes] = []
+    for cid, val in adv.manufacturer_data.items():
+        if cid == 0x004C:  # Apple — там iBeacon, не STOWN
+            continue
+        candidates.append(bytes(val))
+    for val in adv.service_data.values():
+        candidates.append(bytes(val))
+    for data in candidates:
+        if len(data) == 10 and data[0] in _STOWN_CMDS:
+            return data[1:8].hex().upper()
+    return None
 
 
 @dataclass
@@ -252,41 +295,46 @@ class GatewayMonitor:
             self._emit("info", "Мониторинг остановлен")
 
     def _on_adv(self, device, adv) -> None:
-        apple = adv.manufacturer_data.get(0x004C)
-        if not apple or len(apple) < 23:
-            return
-        if apple[0] != 0x02 or apple[1] != 0x15:
-            return
-
-        uuid_bytes = bytes(apple[2:18])
-        uuid_hex = uuid_bytes.hex().upper()
-        uuid_formatted = (
-            f"{uuid_hex[0:8]}-{uuid_hex[8:12]}-{uuid_hex[12:16]}-"
-            f"{uuid_hex[16:20]}-{uuid_hex[20:32]}"
-        )
-        wanted = self.config.beacon_uuid.strip().upper().replace(" ", "")
-        if not wanted:
-            return
-        # Сравниваем без учёта дефисов (на случай если ввели слитно)
-        if uuid_formatted.replace("-", "") != wanted.replace("-", ""):
-            return
-
-        major = (apple[18] << 8) | apple[19]
-        minor = (apple[20] << 8) | apple[21]
         rssi = adv.rssi if adv.rssi is not None else (
             device.rssi if hasattr(device, "rssi") else -100
         )
-
         mac = (device.address or "").upper()
-        vehicle = self._find_vehicle(major, minor, mac)
+
+        # --- iBeacon: major/minor берём только если UUID совпал с beacon_uuid ---
+        major: Optional[int] = None
+        minor: Optional[int] = None
+        apple = adv.manufacturer_data.get(0x004C)
+        if apple and len(apple) >= 23 and apple[0] == 0x02 and apple[1] == 0x15:
+            uuid_hex = bytes(apple[2:18]).hex().upper()
+            wanted = (
+                self.config.beacon_uuid.strip().upper()
+                .replace(" ", "").replace("-", "")
+            )
+            if wanted and uuid_hex == wanted:
+                major = (apple[18] << 8) | apple[19]
+                minor = (apple[20] << 8) | apple[21]
+
+        # --- STOWN-пакет: идентификатор из 10 байт (любая обёртка) ---
+        stown_id = decode_stown_id(adv)
+
+        # Нечего опознавать — ни валидного iBeacon, ни STOWN-пакета.
+        if major is None and stown_id is None:
+            return
+
+        vehicle = self._find_vehicle(major, minor, mac, stown_id)
         if vehicle is None:
             return
+
+        # При STOWN-пути major/minor неизвестны → подставляем 0 для журнала/FSM.
+        log_major = major if major is not None else 0
+        log_minor = minor if minor is not None else 0
 
         key = (
             f"{vehicle.name}|"
             f"{vehicle.major if vehicle.major is not None else '*'}|"
             f"{vehicle.minor if vehicle.minor is not None else '*'}|"
-            f"{vehicle.mac or '*'}"
+            f"{vehicle.mac or '*'}|"
+            f"{vehicle.stown_id or '*'}"
         )
         now = time.time()
 
@@ -297,9 +345,9 @@ class GatewayMonitor:
 
         # Решение о доступе: траектория (ядро ВКР) или простой порог.
         if self.config.decision_mode == "trajectory":
-            self._decide_trajectory(vehicle, key, now, major, minor, rssi)
+            self._decide_trajectory(vehicle, key, now, log_major, log_minor, rssi)
         else:
-            self._decide_threshold(vehicle, key, now, major, minor, rssi)
+            self._decide_threshold(vehicle, key, now, log_major, log_minor, rssi)
 
     def _decide_threshold(
         self, vehicle, key: str, now: float, major: int, minor: int, rssi: int
@@ -360,10 +408,11 @@ class GatewayMonitor:
             self._fire(vehicle, major, minor, rssi)
 
     def _find_vehicle(
-        self, major: int, minor: int, mac: str
+        self, major: Optional[int], minor: Optional[int], mac: str,
+        stown_id: Optional[str] = None,
     ) -> Optional[AuthorizedVehicle]:
         for v in self.config.whitelist:
-            if v.matches(major, minor, mac):
+            if v.matches(major, minor, mac, stown_id):
                 return v
         return None
 
@@ -375,11 +424,14 @@ class GatewayMonitor:
         # HTTP запрос в отдельном потоке чтобы не блокировать asyncio loop
         threading.Thread(
             target=self._post_webhook,
-            args=(vehicle.name, major, minor, rssi),
+            args=(vehicle.name, major, minor, rssi, vehicle.stown_id),
             daemon=True,
         ).start()
 
-    def _post_webhook(self, vehicle: str, major: int, minor: int, rssi: int) -> None:
+    def _post_webhook(
+        self, vehicle: str, major: int, minor: int, rssi: int,
+        stown_id: Optional[str] = None,
+    ) -> None:
         try:
             response = requests.post(
                 self.config.webhook_url,
@@ -387,6 +439,7 @@ class GatewayMonitor:
                     "vehicle": vehicle,
                     "major": major,
                     "minor": minor,
+                    "stown_id": stown_id,
                     "rssi": rssi,
                     "timestamp": datetime.now().isoformat(),
                 },
@@ -679,6 +732,8 @@ class GatewayPanel(ctk.CTkFrame):
                 parts.append("(любой Minor)")
             if v.mac:
                 parts.append(f"MAC={v.mac}")
+            if v.stown_id:
+                parts.append(f"ID={v.stown_id}")
             if not parts:
                 parts.append("(пустая запись)")
             ctk.CTkLabel(
@@ -894,7 +949,7 @@ class _VehicleDialog:
 
         ctk.CTkLabel(
             self._win,
-            text="Задайте хотя бы один признак: Major или MAC",
+            text="Задайте хотя бы один признак: Major, MAC или STOWN ID",
             text_color=MUTED,
             font=ctk.CTkFont(size=11),
         ).pack(pady=(0, 10))
@@ -903,6 +958,9 @@ class _VehicleDialog:
         self._major = self._field("Major (0–65535, опц. если задан MAC)", "")
         self._minor = self._field("Minor (необязательно)", "")
         self._mac = self._field("MAC (AA:BB:CC:DD:EE:FF, опц.)", "")
+        self._stown_id = self._field(
+            "STOWN ID (14 hex, скопируйте поле ID из Сканера, опц.)", ""
+        )
 
         self._error = ctk.CTkLabel(
             self._win, text="", text_color=DANGER,
@@ -983,11 +1041,22 @@ class _VehicleDialog:
                 self._show_error("MAC должен быть в формате AA:BB:CC:DD:EE:FF")
                 return
 
-        if major is None and mac is None:
-            self._show_error("Нужен Major или MAC (хотя бы что-то одно)")
+        stown_id: Optional[str] = None
+        stown_str = self._stown_id.get().strip()
+        if stown_str:
+            n = normalize_id(stown_str)
+            if len(n) != 14 or any(c not in "0123456789ABCDEF" for c in n):
+                self._show_error("STOWN ID: 14 hex-символов (7 байт)")
+                return
+            stown_id = n
+
+        if major is None and mac is None and stown_id is None:
+            self._show_error("Нужен Major, MAC или STOWN ID (хотя бы что-то одно)")
             return
 
-        self._result = AuthorizedVehicle(name=name, major=major, minor=minor, mac=mac)
+        self._result = AuthorizedVehicle(
+            name=name, major=major, minor=minor, mac=mac, stown_id=stown_id
+        )
         self._win.destroy()
 
     def show(self) -> Optional[AuthorizedVehicle]:
