@@ -3,6 +3,12 @@ import 'dart:typed_data';
 import 'package:flutter_ble_peripheral/flutter_ble_peripheral.dart';
 
 import '../models/stown_packet.dart';
+import 'bt_info.dart';
+
+/// Максимальная длина имени метки в эфире. Имя broadcast'ится в том же 31-байтном
+/// пакете, что и 10 байт данных, поэтому длинное имя переполняет рекламу
+/// (ошибка DATA_TOO_LARGE). Ограничиваем консервативно.
+const int kMaxTagNameLen = 12;
 
 /// Вещание 10-байтного STOWN-пакета через flutter_ble_peripheral.
 ///
@@ -19,12 +25,26 @@ class StownAdvertiser {
   bool _advertising = false;
   bool get isAdvertising => _advertising;
 
+  /// Имя BT-адаптера до того как мы его подменили (для восстановления на stop).
+  String? _originalBtName;
+
   Future<bool> isSupported() => _peripheral.isSupported;
 
   Future<BluetoothPeripheralState> start(
     Uint8List packet,
     StownConfig config,
   ) async {
+    final name = _safeName(config.tagName);
+    // Имя метки работает только для manufacturer/service (в iBeacon пакет полон).
+    // На Android имя в рекламе = имя BT-адаптера: задаём его перед стартом и
+    // восстанавливаем при остановке. Имя короткое, чтобы не переполнить пакет.
+    if (name != null && config.wrapper != WrapperFormat.ibeacon) {
+      _originalBtName ??= await BtInfo.getBluetoothName();
+      await BtInfo.setBluetoothName(name);
+      // setName применяется асинхронно — дать имени распространиться.
+      await Future.delayed(const Duration(milliseconds: 350));
+    }
+
     final data = _build(packet, config);
     final state = await _peripheral.start(advertiseData: data);
     _advertising = true;
@@ -34,20 +54,33 @@ class StownAdvertiser {
   Future<void> stop() async {
     await _peripheral.stop();
     _advertising = false;
+    // Возвращаем исходное имя BT, если меняли.
+    if (_originalBtName != null) {
+      await BtInfo.setBluetoothName(_originalBtName!);
+      _originalBtName = null;
+    }
+  }
+
+  /// Имя для эфира: обрезаем до безопасной длины; пустое → null.
+  String? _safeName(String raw) {
+    final n = raw.trim();
+    if (n.isEmpty) return null;
+    return n.length > kMaxTagNameLen ? n.substring(0, kMaxTagNameLen) : n;
   }
 
   AdvertiseData _build(Uint8List packet, StownConfig config) {
-    // Имя метки (LocalName) влезает в пакет только у manufacturer/service —
-    // у iBeacon пакет уже заполнен (UUID+Major+Minor), имя не поместится.
-    final name = config.tagName.trim();
-    final hasName = name.isNotEmpty;
+    // Имя метки влезает только у manufacturer/service — у iBeacon пакет
+    // уже заполнен (UUID+Major+Minor). На Android транслируется имя адаптера
+    // (мы задали его в start), поэтому includeDeviceName=true.
+    final name = _safeName(config.tagName);
+    final hasName = name != null;
 
     switch (config.wrapper) {
       case WrapperFormat.manufacturer:
         return AdvertiseData(
           manufacturerId: config.companyId,
           manufacturerData: packet,
-          localName: hasName ? name : null,
+          localName: name,
           includeDeviceName: hasName,
         );
 
@@ -57,7 +90,7 @@ class StownAdvertiser {
           serviceUuid: uuid,
           serviceDataUuid: uuid,
           serviceData: packet,
-          localName: hasName ? name : null,
+          localName: name,
           includeDeviceName: hasName,
         );
 

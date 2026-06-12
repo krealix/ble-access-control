@@ -48,11 +48,17 @@ class BeaconPreset {
     required this.url,
     required this.serviceUuid,
     required this.manufacturerData,
+    this.advName = '',
   });
 
   final String id;
   final String name;
   final BeaconKind kind;
+
+  /// Имя метки в эфире (LocalName). Пусто — имя не вещается.
+  /// Не работает для iBeacon (пакет полон). На Android транслируется
+  /// как имя BT-адаптера.
+  final String advName;
 
   // iBeacon
   final String uuid;
@@ -84,6 +90,7 @@ class BeaconPreset {
         'url': url,
         'serviceUuid': serviceUuid,
         'manufacturerData': manufacturerData,
+        'advName': advName,
       };
 
   static BeaconPreset fromJson(Map<String, dynamic> j) => BeaconPreset(
@@ -102,6 +109,7 @@ class BeaconPreset {
         url: j['url'] as String? ?? '',
         serviceUuid: j['serviceUuid'] as String? ?? '',
         manufacturerData: j['manufacturerData'] as String? ?? '',
+        advName: j['advName'] as String? ?? '',
       );
 
   BeaconPreset copyWith({
@@ -116,6 +124,7 @@ class BeaconPreset {
     String? url,
     String? serviceUuid,
     String? manufacturerData,
+    String? advName,
   }) =>
       BeaconPreset(
         id: id,
@@ -130,6 +139,7 @@ class BeaconPreset {
         url: url ?? this.url,
         serviceUuid: serviceUuid ?? this.serviceUuid,
         manufacturerData: manufacturerData ?? this.manufacturerData,
+        advName: advName ?? this.advName,
       );
 }
 

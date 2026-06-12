@@ -40,6 +40,7 @@ class _GeneratorScreenState extends State<GeneratorScreen> {
   final _urlCtrl = TextEditingController(text: 'https://flutter.dev');
   final _serviceUuidCtrl = TextEditingController();
   final _mfrDataCtrl = TextEditingController();
+  final _nameCtrl = TextEditingController();
 
   @override
   void initState() {
@@ -78,6 +79,7 @@ class _GeneratorScreenState extends State<GeneratorScreen> {
     _urlCtrl.dispose();
     _serviceUuidCtrl.dispose();
     _mfrDataCtrl.dispose();
+    _nameCtrl.dispose();
     super.dispose();
   }
 
@@ -116,6 +118,7 @@ class _GeneratorScreenState extends State<GeneratorScreen> {
         url: _urlCtrl.text.trim(),
         serviceUuid: _serviceUuidCtrl.text.trim(),
         manufacturerData: _mfrDataCtrl.text.trim(),
+        advName: _nameCtrl.text.trim(),
       );
 
   void _applyPreset(BeaconPreset p) {
@@ -130,6 +133,7 @@ class _GeneratorScreenState extends State<GeneratorScreen> {
       _urlCtrl.text = p.url;
       _serviceUuidCtrl.text = p.serviceUuid;
       _mfrDataCtrl.text = p.manufacturerData;
+      _nameCtrl.text = p.advName;
     });
   }
 
@@ -303,6 +307,17 @@ class _GeneratorScreenState extends State<GeneratorScreen> {
                 ],
                 const SectionLabel('Параметры'),
                 _formFor(_kind),
+                const SizedBox(height: 12),
+                _textField(
+                  _nameCtrl,
+                  'Имя метки',
+                  icon: Icons.label_outline,
+                  hint: _kind == BeaconKind.iBeacon
+                      ? 'iBeacon: имя не влезает в пакет — не вещается. '
+                          'Работает для Eddystone/Custom.'
+                      : 'Видно в сканере вместо «Неизвестное устройство». До 12 символов. '
+                          'На Android временно меняет имя Bluetooth телефона.',
+                ),
               ],
             ),
           ),

@@ -17,20 +17,40 @@ class MainActivity : FlutterActivity() {
                 when (call.method) {
                     "getBluetoothMac" -> {
                         try {
-                            val manager =
-                                applicationContext.getSystemService(Context.BLUETOOTH_SERVICE)
-                                    as? BluetoothManager
-                            val adapter = manager?.adapter ?: BluetoothAdapter.getDefaultAdapter()
                             // На Android 10+ это вернёт "02:00:00:00:00:00" из-за приватности.
                             @Suppress("HardwareIds", "MissingPermission")
-                            val mac = adapter?.address
+                            val mac = btAdapter()?.address
                             result.success(mac)
                         } catch (e: Throwable) {
                             result.error("BT_MAC_ERROR", e.message, null)
                         }
                     }
+                    "getBluetoothName" -> {
+                        try {
+                            @Suppress("MissingPermission")
+                            result.success(btAdapter()?.name)
+                        } catch (e: Throwable) {
+                            result.error("BT_NAME_ERROR", e.message, null)
+                        }
+                    }
+                    "setBluetoothName" -> {
+                        try {
+                            val name = call.argument<String>("name")
+                            @Suppress("MissingPermission")
+                            val ok = if (name != null) btAdapter()?.setName(name) else false
+                            result.success(ok ?: false)
+                        } catch (e: Throwable) {
+                            result.error("BT_NAME_ERROR", e.message, null)
+                        }
+                    }
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    private fun btAdapter(): BluetoothAdapter? {
+        val manager =
+            applicationContext.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+        return manager?.adapter ?: BluetoothAdapter.getDefaultAdapter()
     }
 }

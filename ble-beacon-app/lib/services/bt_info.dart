@@ -26,4 +26,28 @@ class BtInfo {
     if (mac == null) return false;
     return mac.toUpperCase().replaceAll(':', '') == '020000000000';
   }
+
+  /// Текущее имя BT-адаптера (GAP-имя устройства). На Android именно оно
+  /// транслируется в рекламе при includeDeviceName=true.
+  static Future<String?> getBluetoothName() async {
+    try {
+      return await _channel.invokeMethod<String>('getBluetoothName');
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Задаёт имя BT-адаптера (BluetoothAdapter.setName). Глобально меняет имя
+  /// Bluetooth телефона. Применяется асинхронно — перед вещанием нужна
+  /// небольшая пауза. Требует разрешение BLUETOOTH_CONNECT (Android 12+).
+  /// Возвращает true, если операция принята.
+  static Future<bool> setBluetoothName(String name) async {
+    try {
+      final ok = await _channel
+          .invokeMethod<bool>('setBluetoothName', {'name': name});
+      return ok ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
 }

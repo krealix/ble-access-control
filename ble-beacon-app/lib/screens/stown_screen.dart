@@ -714,8 +714,9 @@ class _StownScreenState extends State<StownScreen> {
             'Имя метки',
             hint: _config.wrapper == WrapperFormat.ibeacon
                 ? 'iBeacon: имя не влезает в пакет — не будет видно в сканере. '
-                    'Имя показывается на Manufacturer/Service.'
-                : 'Видно в сканере вместо «Неизвестное устройство». До ~12 символов.',
+                    'Имя работает на Manufacturer/Service.'
+                : 'Видно в сканере вместо «Неизвестное устройство». До 12 символов. '
+                    'На Android временно меняет имя Bluetooth телефона (вернётся при остановке).',
             icon: Icons.label_outline,
             onChanged: (_) => setState(() {}),
           ),

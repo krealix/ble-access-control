@@ -3,11 +3,15 @@ import 'dart:typed_data';
 import 'package:flutter_ble_peripheral/flutter_ble_peripheral.dart';
 
 import '../models/beacon.dart';
+import 'bt_info.dart';
 
 /// Bluetooth SIG-assigned Eddystone UUID в полном 128-битном виде.
 /// На Android-стороне плагин вызывает `UUID.fromString(...)`, который
 /// принимает только полный формат — короткий "FEAA" роняет генератор.
 const _eddystoneFullUuid = '0000FEAA-0000-1000-8000-00805F9B34FB';
+
+/// Лимит длины имени в эфире (имя делит 31-байтный пакет с данными).
+const int _kMaxAdvName = 12;
 
 class BeaconAdvertiser {
   BeaconAdvertiser._();
@@ -15,12 +19,21 @@ class BeaconAdvertiser {
 
   final FlutterBlePeripheral _peripheral = FlutterBlePeripheral();
   bool _advertising = false;
+  String? _originalBtName;
 
   bool get isAdvertising => _advertising;
 
   Future<bool> isSupported() => _peripheral.isSupported;
 
   Future<BluetoothPeripheralState> start(BeaconPreset preset) async {
+    // Имя метки: для iBeacon не влезает в пакет. На Android имя в рекламе —
+    // это имя BT-адаптера: задаём перед стартом, восстанавливаем на stop.
+    final name = _safeName(preset.advName);
+    if (name != null && preset.kind != BeaconKind.iBeacon) {
+      _originalBtName ??= await BtInfo.getBluetoothName();
+      await BtInfo.setBluetoothName(name);
+      await Future.delayed(const Duration(milliseconds: 350));
+    }
     final data = _build(preset);
     final state = await _peripheral.start(advertiseData: data);
     _advertising = true;
@@ -30,9 +43,21 @@ class BeaconAdvertiser {
   Future<void> stop() async {
     await _peripheral.stop();
     _advertising = false;
+    if (_originalBtName != null) {
+      await BtInfo.setBluetoothName(_originalBtName!);
+      _originalBtName = null;
+    }
+  }
+
+  String? _safeName(String raw) {
+    final n = raw.trim();
+    if (n.isEmpty) return null;
+    return n.length > _kMaxAdvName ? n.substring(0, _kMaxAdvName) : n;
   }
 
   AdvertiseData _build(BeaconPreset p) {
+    final name = _safeName(p.advName);
+    final hasName = name != null;
     switch (p.kind) {
       case BeaconKind.iBeacon:
         _validateIBeacon(p);
@@ -46,6 +71,8 @@ class BeaconAdvertiser {
           serviceUuid: _eddystoneFullUuid,
           serviceDataUuid: _eddystoneFullUuid,
           serviceData: _eddystoneUidPayload(p),
+          localName: name,
+          includeDeviceName: hasName,
         );
       case BeaconKind.eddystoneUrl:
         _validateEddystoneUrl(p);
@@ -53,6 +80,8 @@ class BeaconAdvertiser {
           serviceUuid: _eddystoneFullUuid,
           serviceDataUuid: _eddystoneFullUuid,
           serviceData: _eddystoneUrlPayload(p),
+          localName: name,
+          includeDeviceName: hasName,
         );
       case BeaconKind.custom:
         _validateCustom(p);
@@ -62,6 +91,8 @@ class BeaconAdvertiser {
               : _normalizeUuid(p.serviceUuid),
           manufacturerId: 0xFFFF,
           manufacturerData: HexUtils.hexToBytes(p.manufacturerData),
+          localName: name,
+          includeDeviceName: hasName,
         );
       default:
         throw ArgumentError('Unsupported beacon kind: ${p.kind}');
