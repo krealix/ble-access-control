@@ -40,4 +40,22 @@ void main() {
     expect(StownPacket.looksLikeStown([0x10, 0x20, 0x30]), false);
     expect(StownPacket.looksLikeStown(Uint8List(10)), false); // cmd=0x00
   });
+
+  test('phone number encodes to 7 bytes and round-trips', () {
+    final ident = StownPacket.buildIdentifier(IdentifierMode.phone, '79022717737');
+    expect(ident.length, 7);
+    // обратное преобразование возвращает тот же номер (без ведущих нулей)
+    expect(StownPacket.identifierToPhone(ident), '79022717737');
+    // с разделителями — тот же результат (берутся только цифры)
+    final ident2 =
+        StownPacket.buildIdentifier(IdentifierMode.phone, '+7 (902) 271-77-37');
+    expect(ident2, ident);
+  });
+
+  test('phone too long is rejected', () {
+    expect(
+      () => StownPacket.buildIdentifier(IdentifierMode.phone, '9' * 18),
+      throwsFormatException,
+    );
+  });
 }

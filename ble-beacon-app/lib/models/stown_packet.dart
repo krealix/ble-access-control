@@ -14,18 +14,20 @@ const int kIdLen = 7;
 const int kCmdOpen87 = 0x87;
 const int kCmdOpen01 = 0x01;
 
-enum IdentifierMode { deviceId, mac, uuid }
+enum IdentifierMode { deviceId, mac, uuid, phone }
 
 extension IdentifierModeName on IdentifierMode {
   String get storageName => switch (this) {
         IdentifierMode.deviceId => 'device_id',
         IdentifierMode.mac => 'mac',
         IdentifierMode.uuid => 'uuid',
+        IdentifierMode.phone => 'phone',
       };
 
   static IdentifierMode fromName(String? s) => switch (s) {
         'mac' => IdentifierMode.mac,
         'uuid' => IdentifierMode.uuid,
+        'phone' => IdentifierMode.phone,
         _ => IdentifierMode.deviceId,
       };
 }
@@ -89,7 +91,35 @@ class StownPacket {
           throw const FormatException('UUID слишком короткий (нужно ≥ 7 байт)');
         }
         return Uint8List.fromList(raw.sublist(0, kIdLen));
+      case IdentifierMode.phone:
+        // Номер телефона → целое → 7 байт big-endian (только цифры).
+        final digits = value.replaceAll(RegExp(r'\D'), '');
+        if (digits.isEmpty) {
+          throw const FormatException('Введите номер (цифры)');
+        }
+        final n = BigInt.parse(digits);
+        // 7 байт = 56 бит; максимум 2^56-1 (до 17 цифр).
+        if (n > (BigInt.one << (kIdLen * 8)) - BigInt.one) {
+          throw const FormatException('Номер слишком длинный (макс ~17 цифр)');
+        }
+        final out = Uint8List(kIdLen);
+        var v = n;
+        final mask = BigInt.from(0xFF);
+        for (var i = kIdLen - 1; i >= 0; i--) {
+          out[i] = (v & mask).toInt();
+          v = v >> 8;
+        }
+        return out;
     }
+  }
+
+  /// Обратное преобразование 7-байт идентификатора в номер (для отладки/UI).
+  static String identifierToPhone(Uint8List id) {
+    var n = BigInt.zero;
+    for (final b in id) {
+      n = (n << 8) | BigInt.from(b);
+    }
+    return n.toString();
   }
 
   /// Парсит номер замка: '7702' / '0x7702' → int (трактуем как hex).
@@ -177,11 +207,13 @@ class StownConfig {
     this.deviceId = '',
     this.macValue = '',
     this.uuidValue = '',
+    this.phoneValue = '',
     this.locks = const [],
     this.selectedLock = 0,
     this.wrapper = WrapperFormat.manufacturer,
     this.companyId = 0xFFFF,
     this.serviceUuid = 'FFF0',
+    this.tagName = '',
   });
 
   final int command;
@@ -189,16 +221,21 @@ class StownConfig {
   final String deviceId;
   final String macValue;
   final String uuidValue;
+  final String phoneValue;
   final List<GateLock> locks;
   final int selectedLock;
   final WrapperFormat wrapper;
   final int companyId;
   final String serviceUuid;
 
+  /// Имя метки (LocalName в рекламе) — показывается в сканере.
+  final String tagName;
+
   String identifierValueFor(IdentifierMode mode) => switch (mode) {
         IdentifierMode.deviceId => deviceId,
         IdentifierMode.mac => macValue,
         IdentifierMode.uuid => uuidValue,
+        IdentifierMode.phone => phoneValue,
       };
 
   Map<String, dynamic> toJson() => {
@@ -207,11 +244,13 @@ class StownConfig {
         'deviceId': deviceId,
         'macValue': macValue,
         'uuidValue': uuidValue,
+        'phoneValue': phoneValue,
         'locks': locks.map((l) => l.toJson()).toList(),
         'selectedLock': selectedLock,
         'wrapper': wrapper.storageName,
         'companyId': companyId,
         'serviceUuid': serviceUuid,
+        'tagName': tagName,
       };
 
   static StownConfig fromJson(Map<String, dynamic> j) => StownConfig(
@@ -220,6 +259,7 @@ class StownConfig {
         deviceId: j['deviceId'] as String? ?? '',
         macValue: j['macValue'] as String? ?? '',
         uuidValue: j['uuidValue'] as String? ?? '',
+        phoneValue: j['phoneValue'] as String? ?? '',
         locks: (j['locks'] as List? ?? [])
             .map((e) => GateLock.fromJson(e as Map<String, dynamic>))
             .toList(),
@@ -227,6 +267,7 @@ class StownConfig {
         wrapper: WrapperFormatName.fromName(j['wrapper'] as String?),
         companyId: j['companyId'] as int? ?? 0xFFFF,
         serviceUuid: j['serviceUuid'] as String? ?? 'FFF0',
+        tagName: j['tagName'] as String? ?? '',
       );
 
   static StownConfig get defaults => StownConfig(
@@ -243,11 +284,13 @@ class StownConfig {
     String? deviceId,
     String? macValue,
     String? uuidValue,
+    String? phoneValue,
     List<GateLock>? locks,
     int? selectedLock,
     WrapperFormat? wrapper,
     int? companyId,
     String? serviceUuid,
+    String? tagName,
   }) =>
       StownConfig(
         command: command ?? this.command,
@@ -255,10 +298,12 @@ class StownConfig {
         deviceId: deviceId ?? this.deviceId,
         macValue: macValue ?? this.macValue,
         uuidValue: uuidValue ?? this.uuidValue,
+        phoneValue: phoneValue ?? this.phoneValue,
         locks: locks ?? this.locks,
         selectedLock: selectedLock ?? this.selectedLock,
         wrapper: wrapper ?? this.wrapper,
         companyId: companyId ?? this.companyId,
         serviceUuid: serviceUuid ?? this.serviceUuid,
+        tagName: tagName ?? this.tagName,
       );
 }

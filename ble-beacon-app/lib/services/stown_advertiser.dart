@@ -37,11 +37,18 @@ class StownAdvertiser {
   }
 
   AdvertiseData _build(Uint8List packet, StownConfig config) {
+    // Имя метки (LocalName) влезает в пакет только у manufacturer/service —
+    // у iBeacon пакет уже заполнен (UUID+Major+Minor), имя не поместится.
+    final name = config.tagName.trim();
+    final hasName = name.isNotEmpty;
+
     switch (config.wrapper) {
       case WrapperFormat.manufacturer:
         return AdvertiseData(
           manufacturerId: config.companyId,
           manufacturerData: packet,
+          localName: hasName ? name : null,
+          includeDeviceName: hasName,
         );
 
       case WrapperFormat.service:
@@ -50,6 +57,8 @@ class StownAdvertiser {
           serviceUuid: uuid,
           serviceDataUuid: uuid,
           serviceData: packet,
+          localName: hasName ? name : null,
+          includeDeviceName: hasName,
         );
 
       case WrapperFormat.ibeacon:

@@ -44,6 +44,7 @@ class _StownScreenState extends State<StownScreen> {
   final _idCtrl = TextEditingController();
   final _companyCtrl = TextEditingController();
   final _serviceCtrl = TextEditingController();
+  final _nameCtrl = TextEditingController();
 
   @override
   void initState() {
@@ -58,6 +59,7 @@ class _StownScreenState extends State<StownScreen> {
     _idCtrl.dispose();
     _companyCtrl.dispose();
     _serviceCtrl.dispose();
+    _nameCtrl.dispose();
     super.dispose();
   }
 
@@ -69,6 +71,7 @@ class _StownScreenState extends State<StownScreen> {
       _idCtrl.text = cfg.identifierValueFor(cfg.identifierMode);
       _companyCtrl.text = '0x${cfg.companyId.toRadixString(16).padLeft(4, '0').toUpperCase()}';
       _serviceCtrl.text = cfg.serviceUuid;
+      _nameCtrl.text = cfg.tagName;
       _loaded = true;
     });
   }
@@ -107,6 +110,9 @@ class _StownScreenState extends State<StownScreen> {
       case IdentifierMode.uuid:
         _config = _config.copyWith(uuidValue: val);
         break;
+      case IdentifierMode.phone:
+        _config = _config.copyWith(phoneValue: val);
+        break;
     }
   }
 
@@ -115,6 +121,7 @@ class _StownScreenState extends State<StownScreen> {
     _config = _config.copyWith(
       companyId: cid ?? _config.companyId,
       serviceUuid: _serviceCtrl.text.trim(),
+      tagName: _nameCtrl.text.trim(),
     );
   }
 
@@ -545,6 +552,7 @@ class _StownScreenState extends State<StownScreen> {
           _segment<IdentifierMode>(
             options: const {
               IdentifierMode.deviceId: 'Device ID',
+              IdentifierMode.phone: 'Номер',
               IdentifierMode.mac: 'MAC',
               IdentifierMode.uuid: 'UUID',
             },
@@ -560,13 +568,20 @@ class _StownScreenState extends State<StownScreen> {
           const SizedBox(height: 12),
           _field(
             _idCtrl,
-            'Значение',
+            _config.identifierMode == IdentifierMode.phone ? 'Номер телефона' : 'Значение',
             hint: switch (_config.identifierMode) {
               IdentifierMode.deviceId => 'Device ID: 14 hex-символов (7 байт)',
+              IdentifierMode.phone =>
+                'Только цифры. Кодируется в 7 байт (до ~17 цифр). Стабильный, читаемый ID',
               IdentifierMode.mac => 'MAC: 12 hex (6 байт). На iOS/Android реальный MAC недоступен',
               IdentifierMode.uuid => 'UUID: берутся первые 7 байт',
             },
-            icon: Icons.fingerprint,
+            icon: _config.identifierMode == IdentifierMode.phone
+                ? Icons.phone
+                : Icons.fingerprint,
+            keyboardType: _config.identifierMode == IdentifierMode.phone
+                ? TextInputType.phone
+                : TextInputType.text,
             onChanged: (_) => setState(() {}),
           ),
         ],
@@ -693,6 +708,17 @@ class _StownScreenState extends State<StownScreen> {
               'номер замка → Minor. Единственный способ для совместимости с iOS.',
               style: TextStyle(color: AppColors.onSurfaceMuted, fontSize: 12),
             ),
+          const SizedBox(height: 12),
+          _field(
+            _nameCtrl,
+            'Имя метки',
+            hint: _config.wrapper == WrapperFormat.ibeacon
+                ? 'iBeacon: имя не влезает в пакет — не будет видно в сканере. '
+                    'Имя показывается на Manufacturer/Service.'
+                : 'Видно в сканере вместо «Неизвестное устройство». До ~12 символов.',
+            icon: Icons.label_outline,
+            onChanged: (_) => setState(() {}),
+          ),
         ],
       ),
     );
@@ -786,11 +812,13 @@ class _StownScreenState extends State<StownScreen> {
     String? hint,
     IconData? icon,
     ValueChanged<String>? onChanged,
+    TextInputType? keyboardType,
   }) {
     return TextField(
       controller: c,
       enabled: !_advertising,
       onChanged: onChanged,
+      keyboardType: keyboardType,
       style: const TextStyle(
         color: AppColors.onSurface,
         fontFamily: 'monospace',
