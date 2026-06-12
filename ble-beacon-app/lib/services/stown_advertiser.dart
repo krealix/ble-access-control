@@ -54,21 +54,36 @@ class StownAdvertiser {
 
     try {
       final data = _build(packet, config);
-      final state = await _peripheral.start(advertiseData: data);
+      final state =
+          await _peripheral.start(advertiseData: data, advertiseSettings: _legacySettings());
       _advertising = true;
       return state;
     } on PlatformException {
-      // Имя (= имя адаптера в эфире) — самый частый источник отказа вещания
-      // на отдельных прошивках (вендорский код → "UNDOCUMENTED"). Чтобы метка
-      // всё равно вышла в эфир и шлагбаум открывался, повторяем без имени.
+      // Имя (= имя адаптера в эфире) — частый источник отказа вещания на
+      // отдельных прошивках. Чтобы метка всё равно вышла в эфир и шлагбаум
+      // открывался, повторяем без имени.
       if (name == null || config.wrapper == WrapperFormat.ibeacon) rethrow;
       final data = _build(packet, config, dropName: true);
-      final state = await _peripheral.start(advertiseData: data);
+      final state =
+          await _peripheral.start(advertiseData: data, advertiseSettings: _legacySettings());
       _advertising = true;
       _nameDropped = true;
       return state;
     }
   }
+
+  /// Настройки вещания: принудительно ЛЕГАСИ-реклама (startAdvertising),
+  /// поддерживаемая всеми BLE-чипами (4.0+). По умолчанию плагин включает
+  /// extended advertising (advertiseSet=true), которое на чипах без BLE 5.0
+  /// (ext-adv не поддерживается) падает с HCI-кодом 18 (Invalid HCI Command
+  /// Parameters). connectable=false — это маяк; timeout=0 — вещать непрерывно.
+  AdvertiseSettings _legacySettings() => AdvertiseSettings(
+        advertiseSet: false,
+        connectable: false,
+        timeout: 0,
+        advertiseMode: AdvertiseMode.advertiseModeLowLatency,
+        txPowerLevel: AdvertiseTxPower.advertiseTxPowerHigh,
+      );
 
   Future<void> stop() async {
     await _peripheral.stop();

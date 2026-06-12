@@ -43,21 +43,35 @@ class BeaconAdvertiser {
     }
     try {
       final data = _build(preset);
-      final state = await _peripheral.start(advertiseData: data);
+      final state =
+          await _peripheral.start(advertiseData: data, advertiseSettings: _legacySettings());
       _advertising = true;
       return state;
     } on PlatformException {
-      // Имя в эфире — частая причина отказа вещания на отдельных прошивках
-      // (вендорский код → "UNDOCUMENTED"). Повторяем без имени, чтобы метка
-      // всё равно вышла в эфир.
+      // Имя в эфире — частая причина отказа вещания на отдельных прошивках.
+      // Повторяем без имени, чтобы метка всё равно вышла в эфир.
       if (name == null || preset.kind == BeaconKind.iBeacon) rethrow;
       final data = _build(preset, dropName: true);
-      final state = await _peripheral.start(advertiseData: data);
+      final state =
+          await _peripheral.start(advertiseData: data, advertiseSettings: _legacySettings());
       _advertising = true;
       _nameDropped = true;
       return state;
     }
   }
+
+  /// Настройки вещания: принудительно ЛЕГАСИ-реклама (startAdvertising),
+  /// поддерживаемая всеми BLE-чипами (4.0+). По умолчанию плагин включает
+  /// extended advertising (advertiseSet=true), которое на чипах без BLE 5.0
+  /// падает с HCI-кодом 18 (Invalid HCI Command Parameters). connectable=false
+  /// — это маяк; timeout=0 — вещать непрерывно.
+  AdvertiseSettings _legacySettings() => AdvertiseSettings(
+        advertiseSet: false,
+        connectable: false,
+        timeout: 0,
+        advertiseMode: AdvertiseMode.advertiseModeLowLatency,
+        txPowerLevel: AdvertiseTxPower.advertiseTxPowerHigh,
+      );
 
   Future<void> stop() async {
     await _peripheral.stop();
