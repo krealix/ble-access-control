@@ -13,7 +13,11 @@ import '../theme.dart';
 import '../widgets/common.dart';
 
 class StownScreen extends StatefulWidget {
-  const StownScreen({super.key});
+  const StownScreen({super.key, this.standalone = false});
+
+  /// true — экран запущен как отдельное приложение «Метка» (без вкладок и входа):
+  /// прячем кнопку выхода.
+  final bool standalone;
 
   @override
   State<StownScreen> createState() => _StownScreenState();
@@ -227,16 +231,17 @@ class _StownScreenState extends State<StownScreen> {
             tooltip: 'Сохранить',
             onPressed: _advertising ? null : _save,
           ),
-          IconButton(
-            icon: const Icon(Icons.logout, color: AppColors.primary),
-            tooltip: 'Выйти',
-            onPressed: () => performLogout(
-              context,
-              onBeforeLogout: () async {
-                if (_advertising) await _advertiser.stop();
-              },
+          if (!widget.standalone)
+            IconButton(
+              icon: const Icon(Icons.logout, color: AppColors.primary),
+              tooltip: 'Выйти',
+              onPressed: () => performLogout(
+                context,
+                onBeforeLogout: () async {
+                  if (_advertising) await _advertiser.stop();
+                },
+              ),
             ),
-          ),
           const SizedBox(width: 8),
         ],
         title: Row(

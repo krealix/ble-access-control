@@ -37,6 +37,23 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
     }
+
+    // Два приложения из одной кодовой базы:
+    //   full — полное (Сканер/Генератор/Шлюз/Метка), entry lib/main.dart
+    //   tag  — отдельная «Метка» (broadcaster), entry lib/main_tag.dart,
+    //          ставится рядом с полным (applicationId с суффиксом .tag)
+    flavorDimensions += "app"
+    productFlavors {
+        create("full") {
+            dimension = "app"
+            manifestPlaceholders["appName"] = "STOWN BLE"
+        }
+        create("tag") {
+            dimension = "app"
+            applicationIdSuffix = ".tag"
+            manifestPlaceholders["appName"] = "STOWN Метка"
+        }
+    }
 }
 
 flutter {
