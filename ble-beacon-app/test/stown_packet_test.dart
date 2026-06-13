@@ -11,6 +11,28 @@ void main() {
     expect(StownPacket.format(pkt), '87 11 22 33 44 55 66 77 77 02');
   });
 
+  test('phone BCD: 088005553535 → 00 08 80 05 55 35 35', () {
+    final ident =
+        StownPacket.buildIdentifier(IdentifierMode.phone, '088005553535');
+    expect(
+      ident,
+      Uint8List.fromList([0x00, 0x08, 0x80, 0x05, 0x55, 0x35, 0x35]),
+    );
+    // round-trip убирает ведущие нули
+    expect(StownPacket.identifierToPhone(ident), '88005553535');
+  });
+
+  test('IMEI mode uses same BCD packing, max 14 digits', () {
+    final ident =
+        StownPacket.buildIdentifier(IdentifierMode.imei, '35324911012345');
+    expect(ident.length, 7);
+    expect(StownPacket.identifierToPhone(ident), '35324911012345');
+    expect(
+      () => StownPacket.buildIdentifier(IdentifierMode.imei, '123456789012345'),
+      throwsFormatException,
+    );
+  });
+
   test('MAC packet pads to 7 bytes', () {
     final ident =
         StownPacket.buildIdentifier(IdentifierMode.mac, 'AA:BB:CC:DD:EE:FF');

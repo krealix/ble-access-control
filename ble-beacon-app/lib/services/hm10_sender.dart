@@ -106,6 +106,61 @@ class Hm10Sender {
     }
   }
 
+  /// Подключается один раз, пишет несколько пакетов с паузой [gap] между ними,
+  /// отключается. Используется шлюзом для последовательности команд 0x01→0x87.
+  Future<void> sendPackets(
+    BluetoothDevice device,
+    List<Uint8List> packets, {
+    Duration gap = const Duration(milliseconds: 500),
+    void Function(String message)? onLog,
+    Duration connectTimeout = const Duration(seconds: 15),
+  }) async {
+    void log(String m) => onLog?.call(m);
+
+    try {
+      log('Подключение...');
+      await device.connect(timeout: connectTimeout);
+      log('Подключено');
+    } catch (e) {
+      throw Hm10Exception('Не удалось подключиться: $e');
+    }
+
+    try {
+      final services = await device.discoverServices();
+      BluetoothCharacteristic? target;
+      BluetoothCharacteristic? fallbackWrite;
+      for (final s in services) {
+        for (final c in s.characteristics) {
+          if (c.uuid == hm10Char) target = c;
+          if ((c.properties.write || c.properties.writeWithoutResponse) &&
+              fallbackWrite == null) {
+            fallbackWrite = c;
+          }
+        }
+      }
+      target ??= fallbackWrite;
+      if (target == null) {
+        throw Hm10Exception('Не найдена характеристика для записи (write)');
+      }
+      final withoutResponse = target.properties.writeWithoutResponse;
+
+      for (var i = 0; i < packets.length; i++) {
+        if (i > 0) await Future.delayed(gap);
+        await target.write(packets[i], withoutResponse: withoutResponse);
+        log('Отправлено: ${_fmt(packets[i])}');
+      }
+    } on Hm10Exception {
+      rethrow;
+    } catch (e) {
+      throw Hm10Exception('Ошибка записи: $e');
+    } finally {
+      try {
+        await device.disconnect();
+        log('Отключено');
+      } catch (_) {}
+    }
+  }
+
   static String _fmt(Uint8List p) =>
       p.map((b) => b.toRadixString(16).padLeft(2, '0').toUpperCase()).join(' ');
 }

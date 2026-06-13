@@ -35,6 +35,24 @@ void main() {
       expect(v.matches(advMajor: 8), isFalse);
     });
 
+    test('сверка по matchKey (STOWN:имя и MAC)', () {
+      final stown = AuthorizedVehicle(name: 'Авто', matchKey: 'STOWN:Пропуск');
+      expect(stown.isValid, isTrue);
+      expect(stown.matches(advKey: 'STOWN:Пропуск'), isTrue);
+      expect(stown.matches(advKey: 'STOWN:Чужой'), isFalse);
+
+      final byMac = AuthorizedVehicle(name: 'Авто', matchKey: 'C0:1A:22:33:44:55');
+      expect(byMac.matches(advKey: 'c0:1a:22:33:44:55'), isTrue); // регистр не важен
+      expect(byMac.matches(advKey: 'FF:FF:FF:FF:FF:FF'), isFalse);
+    });
+
+    test('matchKey переживает JSON round-trip', () {
+      final v = AuthorizedVehicle(name: 'Авто', matchKey: 'STOWN:Пропуск');
+      final back = AuthorizedVehicle.fromJson(v.toJson());
+      expect(back.matchKey, 'STOWN:Пропуск');
+      expect(back.matches(advKey: 'STOWN:Пропуск'), isTrue);
+    });
+
     test('JSON round-trip сохраняет stownId', () {
       final v = AuthorizedVehicle(name: 'Авто', stownId: 'A1B2C3D4E5F601');
       final back = AuthorizedVehicle.fromJson(v.toJson());

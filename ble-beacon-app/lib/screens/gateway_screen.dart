@@ -38,18 +38,15 @@ class _GatewayScreenState extends State<GatewayScreen> {
   // TCP
   final _tcpHostCtrl = TextEditingController();
   final _tcpPortCtrl = TextEditingController();
-  final _tcpTemplateCtrl = TextEditingController();
 
-  // MQTT
-  final _mqttHostCtrl = TextEditingController();
-  final _mqttPortCtrl = TextEditingController();
-  final _mqttTopicCtrl = TextEditingController();
-  final _mqttUserCtrl = TextEditingController();
-  final _mqttPassCtrl = TextEditingController();
+  // HM-10
+  final _hm10Ctrl = TextEditingController();
+
+  // Общий для TCP/HM-10: номер замка (hex)
+  final _lockCtrl = TextEditingController();
 
   // Selected transport (mirror of config.transport for UI state)
   GatewayTransport _transport = GatewayTransport.http;
-  TcpPayloadFormat _tcpFormat = TcpPayloadFormat.json;
 
   @override
   void initState() {
@@ -71,12 +68,8 @@ class _GatewayScreenState extends State<GatewayScreen> {
     _samplesCtrl.dispose();
     _tcpHostCtrl.dispose();
     _tcpPortCtrl.dispose();
-    _tcpTemplateCtrl.dispose();
-    _mqttHostCtrl.dispose();
-    _mqttPortCtrl.dispose();
-    _mqttTopicCtrl.dispose();
-    _mqttUserCtrl.dispose();
-    _mqttPassCtrl.dispose();
+    _hm10Ctrl.dispose();
+    _lockCtrl.dispose();
     super.dispose();
   }
 
@@ -87,7 +80,6 @@ class _GatewayScreenState extends State<GatewayScreen> {
       _config = cfg;
       _monitor.updateConfig(cfg);
       _transport = cfg.transport;
-      _tcpFormat = cfg.tcpPayloadFormat;
       _haUrlCtrl.text = cfg.haUrl;
       _webhookCtrl.text = cfg.webhookId;
       _rssiCtrl.text = cfg.rssiThreshold.toString();
@@ -95,12 +87,8 @@ class _GatewayScreenState extends State<GatewayScreen> {
       _samplesCtrl.text = cfg.samplesRequired.toString();
       _tcpHostCtrl.text = cfg.tcpHost;
       _tcpPortCtrl.text = cfg.tcpPort.toString();
-      _tcpTemplateCtrl.text = cfg.tcpPayloadTemplate;
-      _mqttHostCtrl.text = cfg.mqttHost;
-      _mqttPortCtrl.text = cfg.mqttPort.toString();
-      _mqttTopicCtrl.text = cfg.mqttTopic;
-      _mqttUserCtrl.text = cfg.mqttUsername;
-      _mqttPassCtrl.text = cfg.mqttPassword;
+      _hm10Ctrl.text = cfg.hm10Device;
+      _lockCtrl.text = cfg.lockHex;
       _loaded = true;
     });
   }
@@ -114,13 +102,8 @@ class _GatewayScreenState extends State<GatewayScreen> {
         webhookId: _webhookCtrl.text.trim(),
         tcpHost: _tcpHostCtrl.text.trim(),
         tcpPort: int.tryParse(_tcpPortCtrl.text.trim()) ?? 9999,
-        tcpPayloadFormat: _tcpFormat,
-        tcpPayloadTemplate: _tcpTemplateCtrl.text,
-        mqttHost: _mqttHostCtrl.text.trim(),
-        mqttPort: int.tryParse(_mqttPortCtrl.text.trim()) ?? 1883,
-        mqttTopic: _mqttTopicCtrl.text.trim(),
-        mqttUsername: _mqttUserCtrl.text.trim(),
-        mqttPassword: _mqttPassCtrl.text,
+        hm10Device: _hm10Ctrl.text.trim(),
+        lockHex: _lockCtrl.text.trim().isEmpty ? '7702' : _lockCtrl.text.trim(),
       );
 
   Future<void> _saveConfig() async {
@@ -169,9 +152,9 @@ class _GatewayScreenState extends State<GatewayScreen> {
           return;
         }
         break;
-      case GatewayTransport.mqtt:
-        if (cfg.mqttHost.isEmpty || cfg.mqttTopic.isEmpty) {
-          _snack('MQTT: заполните брокер и топик');
+      case GatewayTransport.hm10:
+        if (cfg.hm10Device.isEmpty) {
+          _snack('HM-10: укажите адрес (MAC) модуля');
           return;
         }
         break;
@@ -693,7 +676,7 @@ class _GatewayScreenState extends State<GatewayScreen> {
         children: [
           tab(GatewayTransport.http, 'HTTP', Icons.http),
           tab(GatewayTransport.tcp, 'TCP', Icons.electrical_services),
-          tab(GatewayTransport.mqtt, 'MQTT', Icons.cloud_outlined),
+          tab(GatewayTransport.hm10, 'HM-10', Icons.bluetooth),
         ],
       ),
     );
@@ -726,7 +709,7 @@ class _GatewayScreenState extends State<GatewayScreen> {
               child: _textField(
                 _tcpHostCtrl,
                 'TCP хост',
-                hint: 'IP или DNS целевого устройства',
+                hint: 'IP или DNS контроллера',
                 icon: Icons.dns_outlined,
               ),
             ),
@@ -736,138 +719,47 @@ class _GatewayScreenState extends State<GatewayScreen> {
                 _tcpPortCtrl,
                 'Порт',
                 hint: 'напр. 9999',
-                icon: Icons.lan_outlined,
                 numeric: true,
               ),
             ),
           ]),
           const SizedBox(height: 12),
-          const Text(
-            'ФОРМАТ ДАННЫХ',
-            style: TextStyle(
-              color: AppColors.onSurfaceMuted,
-              fontSize: 11,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 1.0,
-            ),
-          ),
-          const SizedBox(height: 6),
-          _tcpFormatSelector(),
-          const SizedBox(height: 12),
-          _textField(
-            _tcpTemplateCtrl,
-            'Шаблон',
-            hint: _tcpFormat == TcpPayloadFormat.json
-                ? 'Не используется — отправляется JSON'
-                : (_tcpFormat == TcpPayloadFormat.text
-                    ? 'Текст с {vehicle}/{mac}/{uuid}/{major}/{minor}/{rssi}. '
-                        'Используйте \\\\n для перевода строки.'
-                    : 'Hex-байты, пробелы/двоеточия игнорируются. Напр. 01 02 AA FF'),
-            icon: Icons.code,
-          ),
+          _lockField(),
+          const SizedBox(height: 8),
+          _commandsHint(),
         ];
-      case GatewayTransport.mqtt:
+      case GatewayTransport.hm10:
         return [
-          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Expanded(
-              flex: 2,
-              child: _textField(
-                _mqttHostCtrl,
-                'MQTT брокер',
-                hint: 'IP или DNS',
-                icon: Icons.cloud_outlined,
-              ),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: _textField(
-                _mqttPortCtrl,
-                'Порт',
-                hint: 'обычно 1883',
-                icon: Icons.lan_outlined,
-                numeric: true,
-              ),
-            ),
-          ]),
-          const SizedBox(height: 12),
           _textField(
-            _mqttTopicCtrl,
-            'Топик',
-            hint: 'Куда публикуем, напр. home/gate/open',
-            icon: Icons.topic_outlined,
+            _hm10Ctrl,
+            'HM-10 адрес (MAC)',
+            hint: 'MAC модуля, напр. E0:E5:CF:A2:BB:46. Скопируйте из «Сканера».',
+            icon: Icons.bluetooth,
           ),
           const SizedBox(height: 12),
-          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Expanded(
-              child: _textField(
-                _mqttUserCtrl,
-                'Логин',
-                hint: 'опционально',
-                icon: Icons.person_outline,
-              ),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: _textField(
-                _mqttPassCtrl,
-                'Пароль',
-                hint: 'опционально',
-                icon: Icons.lock_outline,
-              ),
-            ),
-          ]),
+          _lockField(),
+          const SizedBox(height: 8),
+          _commandsHint(),
         ];
     }
   }
 
-  Widget _tcpFormatSelector() {
-    Widget chip(TcpPayloadFormat f, String label) {
-      final selected = _tcpFormat == f;
-      return Expanded(
-        child: GestureDetector(
-          onTap: _running ? null : () => setState(() => _tcpFormat = f),
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 150),
-            margin: const EdgeInsets.all(3),
-            padding: const EdgeInsets.symmetric(vertical: 7),
-            decoration: BoxDecoration(
-              color: selected
-                  ? AppColors.primary
-                  : Colors.transparent,
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Center(
-              child: Text(
-                label,
-                style: TextStyle(
-                  color: selected
-                      ? Colors.white
-                      : AppColors.onSurfaceMuted,
-                  fontWeight: FontWeight.w600,
-                  fontSize: 12,
-                ),
-              ),
-            ),
-          ),
+  Widget _lockField() => _textField(
+        _lockCtrl,
+        'Номер замка (hex)',
+        hint: 'Идёт в 10-байтный пакет. Напр. 7702',
+        icon: Icons.lock_outline,
+      );
+
+  Widget _commandsHint() => const Text(
+        'Открытие отправляет две команды: сначала пакет с 0x01, через 500 мс — '
+        'с 0x87. Идентификатор берётся из STOWN-метки (иначе нули).',
+        style: TextStyle(
+          color: AppColors.onSurfaceMuted,
+          fontSize: 11,
+          height: 1.4,
         ),
       );
-    }
-
-    return Container(
-      decoration: BoxDecoration(
-        color: AppColors.surfaceDim,
-        borderRadius: BorderRadius.circular(10),
-      ),
-      padding: const EdgeInsets.all(2),
-      child: Row(
-        children: [
-          chip(TcpPayloadFormat.json, 'JSON-строка'),
-          chip(TcpPayloadFormat.text, 'Текст'),
-          chip(TcpPayloadFormat.hex, 'Hex-байты'),
-        ],
-      ),
-    );
-  }
 
   String get _haUrlPreview {
     final url = _haUrlCtrl.text.trim();

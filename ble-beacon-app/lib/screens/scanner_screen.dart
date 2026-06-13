@@ -5,7 +5,9 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../models/beacon.dart';
+import '../models/gateway.dart';
 import '../services/beacon_parser.dart';
+import '../services/gateway_storage.dart';
 import '../theme.dart';
 import '../widgets/common.dart';
 
@@ -445,10 +447,90 @@ class _ScannerScreenState extends State<ScannerScreen> {
                   ),
                 ),
               ),
+              const SizedBox(height: 16),
+              FilledButton.icon(
+                onPressed: () {
+                  Navigator.of(context).maybePop();
+                  _addToWhitelist(b);
+                },
+                icon: const Icon(Icons.playlist_add_check),
+                label: const Text('В авторизованные ТС'),
+                style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(46)),
+              ),
             ],
           ),
         ),
       ),
     );
+  }
+
+  /// Добавляет метку в белый список шлюза. Ключ: для STOWN — "STOWN:ИМЯ",
+  /// иначе — MAC-адрес. Просит комментарий.
+  Future<void> _addToWhitelist(ParsedBeacon b) async {
+    final isStown = b.kind == BeaconKind.stown;
+    final key = isStown ? 'STOWN:${b.name ?? ''}' : b.deviceId;
+    final commentCtrl = TextEditingController(text: b.name ?? b.kind.label);
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surfaceElevated,
+        title: const Text('В авторизованные ТС',
+            style: TextStyle(color: AppColors.onSurface)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              'Ключ: $key',
+              style: const TextStyle(
+                color: AppColors.onSurfaceMuted,
+                fontFamily: 'monospace',
+                fontSize: 12,
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: commentCtrl,
+              autofocus: true,
+              style: const TextStyle(color: AppColors.onSurface),
+              decoration: const InputDecoration(
+                labelText: 'Комментарий / имя',
+                prefixIcon: Icon(Icons.edit_note),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Отмена'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Добавить'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+
+    final cfg = await GatewayStorage.instance.load();
+    final exists = cfg.whitelist
+        .any((v) => (v.matchKey ?? '').toUpperCase() == key.toUpperCase());
+    if (exists) {
+      _showSnack('Уже в базе: $key');
+      return;
+    }
+    final comment =
+        commentCtrl.text.trim().isEmpty ? key : commentCtrl.text.trim();
+    final updated = cfg.copyWith(
+      whitelist: [
+        ...cfg.whitelist,
+        AuthorizedVehicle(name: comment, matchKey: key),
+      ],
+    );
+    await GatewayStorage.instance.save(updated);
+    _showSnack('Добавлено в авторизованные: $comment');
   }
 }

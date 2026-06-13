@@ -36,6 +36,7 @@ class AuthorizedVehicle {
     this.major,
     this.minor,
     this.stownId,
+    this.matchKey,
   });
 
   final String name;
@@ -48,13 +49,18 @@ class AuthorizedVehicle {
   /// 10-байтного пакета, в любой обёртке (manufacturer/service/iBeacon).
   final String? stownId;
 
+  /// Ключ из «Сканера»: для STOWN-метки — "STOWN:ИМЯ", иначе — MAC-адрес.
+  /// Сверяется с ключом, который шлюз вычисляет по рекламе.
+  final String? matchKey;
+
   /// Хотя бы одно поле идентификации заполнено.
   bool get isValid =>
       (uuid != null && uuid!.isNotEmpty) ||
       (macAddress != null && macAddress!.isNotEmpty) ||
       major != null ||
       minor != null ||
-      (stownId != null && stownId!.isNotEmpty);
+      (stownId != null && stownId!.isNotEmpty) ||
+      (matchKey != null && matchKey!.isNotEmpty);
 
   /// OR-матчинг: возвращает true если хотя бы одно непустое поле
   /// совпадает с соответствующим полем рекламы.
@@ -64,7 +70,11 @@ class AuthorizedVehicle {
     int? advMajor,
     int? advMinor,
     String? advStownId,
+    String? advKey,
   }) {
+    if (matchKey != null && matchKey!.isNotEmpty && advKey != null) {
+      if (matchKey!.toUpperCase() == advKey.toUpperCase()) return true;
+    }
     if (uuid != null && uuid!.isNotEmpty) {
       if (advUuid != null && normalizeUuid(uuid) == normalizeUuid(advUuid)) {
         return true;
@@ -96,8 +106,15 @@ class AuthorizedVehicle {
     int? advMajor,
     int? advMinor,
     String? advStownId,
+    String? advKey,
   }) {
     final matched = <String>[];
+    if (matchKey != null &&
+        matchKey!.isNotEmpty &&
+        advKey != null &&
+        matchKey!.toUpperCase() == advKey.toUpperCase()) {
+      matched.add(matchKey!.startsWith('STOWN:') ? 'Имя' : 'MAC');
+    }
     if (uuid != null &&
         uuid!.isNotEmpty &&
         advUuid != null &&
@@ -138,6 +155,7 @@ class AuthorizedVehicle {
     if (major != null) parts.add('Major=$major');
     if (minor != null) parts.add('Minor=$minor');
     if (stownId != null && stownId!.isNotEmpty) parts.add('ID=$stownId');
+    if (matchKey != null && matchKey!.isNotEmpty) parts.add(matchKey!);
     return parts.isEmpty ? '(пусто)' : parts.join('  ');
   }
 
@@ -148,6 +166,7 @@ class AuthorizedVehicle {
         if (major != null) 'major': major,
         if (minor != null) 'minor': minor,
         if (stownId != null) 'stownId': stownId,
+        if (matchKey != null) 'matchKey': matchKey,
       };
 
   static AuthorizedVehicle fromJson(Map<String, dynamic> j) {
@@ -158,22 +177,16 @@ class AuthorizedVehicle {
       major: j['major'] as int?,
       minor: j['minor'] as int?,
       stownId: j['stownId'] as String?,
+      matchKey: j['matchKey'] as String?,
     );
   }
 }
 
-/// Транспорт для отправки сигнала «открыть».
+/// Транспорт для отправки команды «открыть».
 enum GatewayTransport {
-  http,   // HTTP POST на HA webhook
-  tcp,    // Raw TCP-сокет на хост:порт
-  mqtt,   // MQTT publish на брокер/топик
-}
-
-/// Формат данных при TCP-передаче.
-enum TcpPayloadFormat {
-  json,   // JSON-строка + \n
-  text,   // Текст-шаблон с {vehicle}, {mac} и т.п.
-  hex,    // Фиксированные hex-байты
+  http,   // HTTP POST на HA webhook (JSON-уведомление)
+  tcp,    // Raw TCP-сокет: 10-байтные STOWN-пакеты (01, пауза, 87)
+  hm10,   // Прямая запись STOWN-пакетов в HM-10 по GATT (FFE1)
 }
 
 /// Конфигурация шлюзового телефона у шлагбаума.
@@ -187,17 +200,13 @@ class GatewayConfig {
     // HTTP
     this.haUrl = 'http://192.168.0.10:8123',
     this.webhookId = 'gate_open',
-    // TCP
+    // TCP (отправка STOWN-команд на хост:порт)
     this.tcpHost = '192.168.0.10',
     this.tcpPort = 9999,
-    this.tcpPayloadFormat = TcpPayloadFormat.json,
-    this.tcpPayloadTemplate = 'OPEN {vehicle}\\n',
-    // MQTT
-    this.mqttHost = '192.168.0.10',
-    this.mqttPort = 1883,
-    this.mqttTopic = 'home/gate/open',
-    this.mqttUsername = '',
-    this.mqttPassword = '',
+    // HM-10 (прямая запись по GATT)
+    this.hm10Device = '',
+    // Общий для TCP и HM-10: номер замка (hex), напр. 7702
+    this.lockHex = '7702',
   });
 
   // Общие
@@ -216,15 +225,12 @@ class GatewayConfig {
   // TCP
   final String tcpHost;
   final int tcpPort;
-  final TcpPayloadFormat tcpPayloadFormat;
-  final String tcpPayloadTemplate;
 
-  // MQTT
-  final String mqttHost;
-  final int mqttPort;
-  final String mqttTopic;
-  final String mqttUsername;
-  final String mqttPassword;
+  // HM-10: адрес (MAC) или имя целевого модуля
+  final String hm10Device;
+
+  // Номер замка (hex) для STOWN-команд TCP/HM-10
+  final String lockHex;
 
   String get webhookUrl {
     final base = haUrl.replaceAll(RegExp(r'/+$'), '');
@@ -241,13 +247,8 @@ class GatewayConfig {
         'webhookId': webhookId,
         'tcpHost': tcpHost,
         'tcpPort': tcpPort,
-        'tcpPayloadFormat': tcpPayloadFormat.name,
-        'tcpPayloadTemplate': tcpPayloadTemplate,
-        'mqttHost': mqttHost,
-        'mqttPort': mqttPort,
-        'mqttTopic': mqttTopic,
-        'mqttUsername': mqttUsername,
-        'mqttPassword': mqttPassword,
+        'hm10Device': hm10Device,
+        'lockHex': lockHex,
       };
 
   /// Загрузка с учётом старого формата (где был beaconUuid на уровне config).
@@ -265,6 +266,8 @@ class GatewayConfig {
         macAddress: map['macAddress'] as String?,
         major: map['major'] as int?,
         minor: map['minor'] as int?,
+        stownId: map['stownId'] as String?,
+        matchKey: map['matchKey'] as String?,
       );
     }).toList();
 
@@ -274,13 +277,6 @@ class GatewayConfig {
           .firstWhere((t) => t.name == (j['transport'] as String? ?? 'http'));
     } catch (_) {
       transport = GatewayTransport.http;
-    }
-    TcpPayloadFormat tcpFmt;
-    try {
-      tcpFmt = TcpPayloadFormat.values
-          .firstWhere((f) => f.name == (j['tcpPayloadFormat'] as String? ?? 'json'));
-    } catch (_) {
-      tcpFmt = TcpPayloadFormat.json;
     }
 
     return GatewayConfig(
@@ -293,14 +289,8 @@ class GatewayConfig {
       webhookId: j['webhookId'] as String? ?? 'gate_open',
       tcpHost: j['tcpHost'] as String? ?? '192.168.0.10',
       tcpPort: j['tcpPort'] as int? ?? 9999,
-      tcpPayloadFormat: tcpFmt,
-      tcpPayloadTemplate:
-          j['tcpPayloadTemplate'] as String? ?? 'OPEN {vehicle}\\n',
-      mqttHost: j['mqttHost'] as String? ?? '192.168.0.10',
-      mqttPort: j['mqttPort'] as int? ?? 1883,
-      mqttTopic: j['mqttTopic'] as String? ?? 'home/gate/open',
-      mqttUsername: j['mqttUsername'] as String? ?? '',
-      mqttPassword: j['mqttPassword'] as String? ?? '',
+      hm10Device: j['hm10Device'] as String? ?? '',
+      lockHex: j['lockHex'] as String? ?? '7702',
     );
   }
 
@@ -321,13 +311,8 @@ class GatewayConfig {
     String? webhookId,
     String? tcpHost,
     int? tcpPort,
-    TcpPayloadFormat? tcpPayloadFormat,
-    String? tcpPayloadTemplate,
-    String? mqttHost,
-    int? mqttPort,
-    String? mqttTopic,
-    String? mqttUsername,
-    String? mqttPassword,
+    String? hm10Device,
+    String? lockHex,
   }) =>
       GatewayConfig(
         rssiThreshold: rssiThreshold ?? this.rssiThreshold,
@@ -339,13 +324,8 @@ class GatewayConfig {
         webhookId: webhookId ?? this.webhookId,
         tcpHost: tcpHost ?? this.tcpHost,
         tcpPort: tcpPort ?? this.tcpPort,
-        tcpPayloadFormat: tcpPayloadFormat ?? this.tcpPayloadFormat,
-        tcpPayloadTemplate: tcpPayloadTemplate ?? this.tcpPayloadTemplate,
-        mqttHost: mqttHost ?? this.mqttHost,
-        mqttPort: mqttPort ?? this.mqttPort,
-        mqttTopic: mqttTopic ?? this.mqttTopic,
-        mqttUsername: mqttUsername ?? this.mqttUsername,
-        mqttPassword: mqttPassword ?? this.mqttPassword,
+        hm10Device: hm10Device ?? this.hm10Device,
+        lockHex: lockHex ?? this.lockHex,
       );
 }
 

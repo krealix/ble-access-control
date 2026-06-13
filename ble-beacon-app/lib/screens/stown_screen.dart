@@ -3,19 +3,14 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_ble_peripheral/flutter_ble_peripheral.dart';
-import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../models/stown_packet.dart';
 import '../services/bt_info.dart';
-import '../services/hm10_sender.dart';
 import '../services/stown_advertiser.dart';
 import '../services/stown_storage.dart';
 import '../theme.dart';
 import '../widgets/common.dart';
-
-/// Режим работы экрана: вещать метку в эфир или подключаться к HM-10 и слать.
-enum StownMode { broadcast, send }
 
 class StownScreen extends StatefulWidget {
   const StownScreen({super.key});
@@ -29,18 +24,6 @@ class _StownScreenState extends State<StownScreen> {
   StownConfig _config = StownConfig.defaults;
   bool _advertising = false;
   bool _loaded = false;
-
-  StownMode _mode = StownMode.send;
-
-  // Отправка на HM-10
-  final _sender = Hm10Sender.instance;
-  StreamSubscription<List<ScanResult>>? _scanSub;
-  bool _scanning = false;
-  bool _sending = false;
-  final List<ScanResult> _found = [];
-  BluetoothDevice? _selectedDevice;
-  String? _selectedName;
-  final List<String> _sendLog = [];
 
   final _cmdCtrl = TextEditingController();
   final _idCtrl = TextEditingController();
@@ -56,8 +39,6 @@ class _StownScreenState extends State<StownScreen> {
 
   @override
   void dispose() {
-    _scanSub?.cancel();
-    _sender.stopScan();
     _cmdCtrl.dispose();
     _idCtrl.dispose();
     _companyCtrl.dispose();
@@ -116,6 +97,9 @@ class _StownScreenState extends State<StownScreen> {
         break;
       case IdentifierMode.phone:
         _config = _config.copyWith(phoneValue: val);
+        break;
+      case IdentifierMode.imei:
+        _config = _config.copyWith(imeiValue: val);
         break;
     }
   }
@@ -262,7 +246,7 @@ class _StownScreenState extends State<StownScreen> {
               height: 10,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: (_advertising || _sending)
+                color: _advertising
                     ? AppColors.success
                     : AppColors.onSurfaceMuted,
               ),
@@ -274,13 +258,7 @@ class _StownScreenState extends State<StownScreen> {
               children: [
                 const Text('STOWN-метка'),
                 Text(
-                  _mode == StownMode.broadcast
-                      ? (_advertising ? 'Вещание активно' : 'Остановлена')
-                      : (_sending
-                          ? 'Отправка...'
-                          : (_selectedDevice != null
-                              ? 'HM-10 выбран'
-                              : 'Выберите HM-10')),
+                  _advertising ? 'Вещание активно' : 'Остановлена',
                   style: const TextStyle(
                     color: AppColors.onSurfaceMuted,
                     fontSize: 13,
@@ -299,25 +277,15 @@ class _StownScreenState extends State<StownScreen> {
             child: ListView(
               padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
               children: [
-                _modeCard(),
-                const SizedBox(height: 12),
                 _commandCard(),
                 const SizedBox(height: 12),
                 _identifierCard(),
                 const SizedBox(height: 12),
                 _locksCard(),
                 const SizedBox(height: 12),
-                if (_mode == StownMode.broadcast) ...[
-                  _wrapperCard(),
-                  const SizedBox(height: 12),
-                ],
+                _wrapperCard(),
+                const SizedBox(height: 12),
                 _previewCard(packet),
-                if (_mode == StownMode.send) ...[
-                  const SizedBox(height: 12),
-                  _deviceCard(),
-                  const SizedBox(height: 12),
-                  _logCard(),
-                ],
               ],
             ),
           ),
@@ -325,228 +293,11 @@ class _StownScreenState extends State<StownScreen> {
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
             child: SizedBox(
               width: double.infinity,
-              child: _mode == StownMode.broadcast
-                  ? PrimaryGradientButton(
-                      label: _advertising ? 'Остановить вещание' : 'Начать вещание',
-                      icon: _advertising ? Icons.stop : Icons.play_arrow,
-                      onPressed: _toggle,
-                      color: _advertising ? AppColors.danger : null,
-                    )
-                  : PrimaryGradientButton(
-                      label: _sending ? 'Отправка...' : 'Открыть замок',
-                      icon: _sending ? Icons.hourglass_empty : Icons.lock_open,
-                      onPressed: (_sending || _selectedDevice == null)
-                          ? null
-                          : _sendToHm10,
-                    ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ---- Mode selector ----
-
-  Widget _modeCard() {
-    return StownCard(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          const SectionLabel('Режим'),
-          const SizedBox(height: 8),
-          _segment<StownMode>(
-            options: const {
-              StownMode.send: 'Отправка на HM-10',
-              StownMode.broadcast: 'Вещание метки',
-            },
-            value: _mode,
-            onChanged: (m) async {
-              // При уходе из режима отправки — гасим скан.
-              if (m != StownMode.send) {
-                await _sender.stopScan();
-                await _scanSub?.cancel();
-                if (mounted) setState(() => _scanning = false);
-              }
-              if (mounted) setState(() => _mode = m);
-            },
-          ),
-          const SizedBox(height: 8),
-          Text(
-            _mode == StownMode.send
-                ? 'Подключение к модулю HM-10 и запись 10 байт в характеристику FFE1.'
-                : 'Вещание 10 байт в эфир (если HM-10 сам сканирует).',
-            style: const TextStyle(color: AppColors.onSurfaceMuted, fontSize: 12),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ---- Device selection + send (HM-10) ----
-
-  Widget _deviceCard() {
-    return StownCard(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            children: [
-              const Expanded(child: SectionLabel('Устройство HM-10')),
-              if (_scanning)
-                const SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              else
-                IconButton(
-                  icon: const Icon(Icons.refresh, color: AppColors.primary),
-                  tooltip: 'Искать',
-                  onPressed: _sending ? null : _startScan,
-                ),
-            ],
-          ),
-          if (_selectedDevice != null)
-            Container(
-              margin: const EdgeInsets.only(top: 4),
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-              decoration: BoxDecoration(
-                color: AppColors.primary.withValues(alpha: 0.15),
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: AppColors.primary),
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.bluetooth_connected, color: AppColors.primary, size: 20),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          _selectedName ?? 'Выбрано',
-                          style: const TextStyle(
-                            color: AppColors.onSurface,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        Text(
-                          _selectedDevice!.remoteId.str,
-                          style: const TextStyle(
-                            color: AppColors.onSurfaceMuted,
-                            fontFamily: 'monospace',
-                            fontSize: 11,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  TextButton(
-                    onPressed: _sending ? null : () => setState(() {
-                      _selectedDevice = null;
-                      _selectedName = null;
-                    }),
-                    child: const Text('Сменить'),
-                  ),
-                ],
-              ),
-            ),
-          if (_selectedDevice == null) ...[
-            if (_found.isEmpty && !_scanning)
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 8),
-                child: Text(
-                  'Нажмите «Искать» — найдём HM-10 рядом',
-                  style: TextStyle(color: AppColors.onSurfaceMuted),
-                ),
-              ),
-            ..._found.map(_deviceTile),
-          ],
-        ],
-      ),
-    );
-  }
-
-  Widget _deviceTile(ScanResult r) {
-    final isHm = Hm10Sender.looksLikeHm10(r);
-    final name = r.advertisementData.advName.isEmpty
-        ? '(без имени)'
-        : r.advertisementData.advName;
-    return InkWell(
-      onTap: () => setState(() {
-        _selectedDevice = r.device;
-        _selectedName = name;
-      }),
-      borderRadius: BorderRadius.circular(10),
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 3),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        decoration: BoxDecoration(
-          color: AppColors.surfaceDim,
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(
-            color: isHm ? AppColors.primary : AppColors.divider,
-          ),
-        ),
-        child: Row(
-          children: [
-            Icon(
-              isHm ? Icons.sensors : Icons.bluetooth,
-              color: isHm ? AppColors.primary : AppColors.onSurfaceMuted,
-              size: 20,
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    name,
-                    style: TextStyle(
-                      color: AppColors.onSurface,
-                      fontWeight: isHm ? FontWeight.w700 : FontWeight.w500,
-                    ),
-                  ),
-                  Text(
-                    r.device.remoteId.str,
-                    style: const TextStyle(
-                      color: AppColors.onSurfaceMuted,
-                      fontFamily: 'monospace',
-                      fontSize: 11,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            Text(
-              '${r.rssi}',
-              style: const TextStyle(color: AppColors.onSurfaceMuted, fontSize: 12),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _logCard() {
-    if (_sendLog.isEmpty) return const SizedBox.shrink();
-    return StownCard(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          const SectionLabel('Журнал отправки'),
-          const SizedBox(height: 6),
-          ..._sendLog.map(
-            (line) => Padding(
-              padding: const EdgeInsets.symmetric(vertical: 2),
-              child: Text(
-                line,
-                style: const TextStyle(
-                  color: AppColors.onSurfaceMuted,
-                  fontFamily: 'monospace',
-                  fontSize: 12,
-                ),
+              child: PrimaryGradientButton(
+                label: _advertising ? 'Остановить вещание' : 'Начать вещание',
+                icon: _advertising ? Icons.stop : Icons.play_arrow,
+                onPressed: _toggle,
+                color: _advertising ? AppColors.danger : null,
               ),
             ),
           ),
@@ -673,8 +424,9 @@ class _StownScreenState extends State<StownScreen> {
           const SizedBox(height: 8),
           _segment<IdentifierMode>(
             options: const {
-              IdentifierMode.deviceId: 'Device ID',
+              IdentifierMode.deviceId: 'Device',
               IdentifierMode.phone: 'Номер',
+              IdentifierMode.imei: 'IMEI',
               IdentifierMode.mac: 'MAC',
               IdentifierMode.uuid: 'UUID',
             },
@@ -690,20 +442,35 @@ class _StownScreenState extends State<StownScreen> {
           const SizedBox(height: 12),
           _field(
             _idCtrl,
-            _config.identifierMode == IdentifierMode.phone ? 'Номер телефона' : 'Значение',
+            switch (_config.identifierMode) {
+              IdentifierMode.phone => 'Номер телефона',
+              IdentifierMode.imei => 'IMEI',
+              _ => 'Значение',
+            },
             hint: switch (_config.identifierMode) {
               IdentifierMode.deviceId => 'Device ID: 14 hex-символов (7 байт)',
               IdentifierMode.phone =>
-                'Только цифры. Кодируется в 7 байт (до ~17 цифр). Стабильный, читаемый ID',
+                'Только цифры, максимум 14. BCD-упаковка в 7 байт (по 2 цифры на байт)',
+              IdentifierMode.imei =>
+                'IMEI 15 цифр; кодируем первые 14 (BCD). На Android 10+ авточтение IMEI '
+                    'запрещено системой — вводите вручную',
               IdentifierMode.mac => 'MAC: 12 hex (6 байт). На iOS/Android реальный MAC недоступен',
               IdentifierMode.uuid => 'UUID: берутся первые 7 байт',
             },
-            icon: _config.identifierMode == IdentifierMode.phone
-                ? Icons.phone
-                : Icons.fingerprint,
-            keyboardType: _config.identifierMode == IdentifierMode.phone
+            icon: switch (_config.identifierMode) {
+              IdentifierMode.phone => Icons.phone,
+              IdentifierMode.imei => Icons.smartphone,
+              _ => Icons.fingerprint,
+            },
+            keyboardType: _isDigitsMode(_config.identifierMode)
                 ? TextInputType.phone
                 : TextInputType.text,
+            inputFormatters: _isDigitsMode(_config.identifierMode)
+                ? [
+                    FilteringTextInputFormatter.digitsOnly,
+                    LengthLimitingTextInputFormatter(StownPacket.kBcdMaxDigits),
+                  ]
+                : null,
             onChanged: (_) => setState(() {}),
           ),
         ],
@@ -929,6 +696,10 @@ class _StownScreenState extends State<StownScreen> {
     );
   }
 
+  /// true для режимов, где вводятся только цифры (телефон / IMEI → BCD).
+  bool _isDigitsMode(IdentifierMode m) =>
+      m == IdentifierMode.phone || m == IdentifierMode.imei;
+
   Widget _field(
     TextEditingController c,
     String label, {
@@ -936,12 +707,14 @@ class _StownScreenState extends State<StownScreen> {
     IconData? icon,
     ValueChanged<String>? onChanged,
     TextInputType? keyboardType,
+    List<TextInputFormatter>? inputFormatters,
   }) {
     return TextField(
       controller: c,
       enabled: !_advertising,
       onChanged: onChanged,
       keyboardType: keyboardType,
+      inputFormatters: inputFormatters,
       style: const TextStyle(
         color: AppColors.onSurface,
         fontFamily: 'monospace',
@@ -959,99 +732,6 @@ class _StownScreenState extends State<StownScreen> {
         helperMaxLines: 3,
       ),
     );
-  }
-
-  // ---- HM-10 scan & send ----
-
-  Future<bool> _ensureScanPermissions() async {
-    final res = await [
-      Permission.bluetoothScan,
-      Permission.bluetoothConnect,
-      Permission.locationWhenInUse,
-    ].request();
-    return res[Permission.bluetoothScan]?.isGranted == true &&
-        res[Permission.bluetoothConnect]?.isGranted == true;
-  }
-
-  Future<void> _startScan() async {
-    if (!await _ensureScanPermissions()) {
-      _snack('Нужны разрешения Bluetooth');
-      return;
-    }
-    setState(() {
-      _found.clear();
-      _scanning = true;
-    });
-    _scanSub?.cancel();
-    _scanSub = _sender.scanResults.listen((results) {
-      if (!mounted) return;
-      setState(() {
-        _found
-          ..clear()
-          ..addAll(results);
-        // HM-10 кандидаты вверх, потом по RSSI
-        _found.sort((a, b) {
-          final ah = Hm10Sender.looksLikeHm10(a) ? 0 : 1;
-          final bh = Hm10Sender.looksLikeHm10(b) ? 0 : 1;
-          if (ah != bh) return ah - bh;
-          return b.rssi.compareTo(a.rssi);
-        });
-      });
-    });
-    try {
-      await _sender.startScan(timeout: const Duration(seconds: 8));
-    } catch (e) {
-      _snack('Ошибка сканирования: $e');
-    }
-    // Через таймаут скан сам остановится — снимем индикатор
-    Future.delayed(const Duration(seconds: 8), () {
-      if (mounted) setState(() => _scanning = false);
-    });
-  }
-
-  Future<void> _sendToHm10() async {
-    final device = _selectedDevice;
-    if (device == null) return;
-    final packet = _currentPacket();
-    if (packet == null) {
-      _snack('Проверьте параметры пакета');
-      return;
-    }
-    // Останавливаем скан перед подключением
-    await _sender.stopScan();
-    await _scanSub?.cancel();
-    if (!mounted) return;
-
-    setState(() {
-      _sending = true;
-      _scanning = false;
-      _sendLog.clear();
-    });
-
-    try {
-      await _sender.sendPacket(
-        device,
-        packet,
-        onLog: (m) {
-          if (mounted) setState(() => _sendLog.add(m));
-        },
-      );
-      if (mounted) {
-        _snack('Команда отправлена: ${StownPacket.format(packet)}');
-      }
-    } on Hm10Exception catch (e) {
-      if (mounted) {
-        setState(() => _sendLog.add('ОШИБКА: ${e.message}'));
-        _snack(e.message);
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() => _sendLog.add('ОШИБКА: $e'));
-        _snack('Ошибка: $e');
-      }
-    } finally {
-      if (mounted) setState(() => _sending = false);
-    }
   }
 
   // ---- Actions ----

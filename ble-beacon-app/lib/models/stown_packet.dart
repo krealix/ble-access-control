@@ -14,7 +14,7 @@ const int kIdLen = 7;
 const int kCmdOpen87 = 0x87;
 const int kCmdOpen01 = 0x01;
 
-enum IdentifierMode { deviceId, mac, uuid, phone }
+enum IdentifierMode { deviceId, mac, uuid, phone, imei }
 
 extension IdentifierModeName on IdentifierMode {
   String get storageName => switch (this) {
@@ -22,12 +22,14 @@ extension IdentifierModeName on IdentifierMode {
         IdentifierMode.mac => 'mac',
         IdentifierMode.uuid => 'uuid',
         IdentifierMode.phone => 'phone',
+        IdentifierMode.imei => 'imei',
       };
 
   static IdentifierMode fromName(String? s) => switch (s) {
         'mac' => IdentifierMode.mac,
         'uuid' => IdentifierMode.uuid,
         'phone' => IdentifierMode.phone,
+        'imei' => IdentifierMode.imei,
         _ => IdentifierMode.deviceId,
       };
 }
@@ -92,34 +94,46 @@ class StownPacket {
         }
         return Uint8List.fromList(raw.sublist(0, kIdLen));
       case IdentifierMode.phone:
-        // Номер телефона → целое → 7 байт big-endian (только цифры).
-        final digits = value.replaceAll(RegExp(r'\D'), '');
-        if (digits.isEmpty) {
-          throw const FormatException('Введите номер (цифры)');
-        }
-        final n = BigInt.parse(digits);
-        // 7 байт = 56 бит; максимум 2^56-1 (до 17 цифр).
-        if (n > (BigInt.one << (kIdLen * 8)) - BigInt.one) {
-          throw const FormatException('Номер слишком длинный (макс ~17 цифр)');
-        }
-        final out = Uint8List(kIdLen);
-        var v = n;
-        final mask = BigInt.from(0xFF);
-        for (var i = kIdLen - 1; i >= 0; i--) {
-          out[i] = (v & mask).toInt();
-          v = v >> 8;
-        }
-        return out;
+      case IdentifierMode.imei:
+        // Номер телефона / IMEI → BCD: каждая цифра в одном полубайте,
+        // 7 байт = 14 цифр. Дополняем слева нулями.
+        return _bcdEncode14(value);
     }
   }
 
-  /// Обратное преобразование 7-байт идентификатора в номер (для отладки/UI).
-  static String identifierToPhone(Uint8List id) {
-    var n = BigInt.zero;
-    for (final b in id) {
-      n = (n << 8) | BigInt.from(b);
+  /// Максимум цифр, помещающихся в 7 байт BCD (по 2 цифры на байт).
+  static const int kBcdMaxDigits = kIdLen * 2; // 14
+
+  /// Кодирует строку цифр в 7 байт BCD: слева дополняется нулями до 14 цифр,
+  /// каждая пара цифр → один байт (старший полубайт — первая цифра).
+  static Uint8List _bcdEncode14(String value) {
+    final digits = value.replaceAll(RegExp(r'\D'), '');
+    if (digits.isEmpty) {
+      throw const FormatException('Введите цифры');
     }
-    return n.toString();
+    if (digits.length > kBcdMaxDigits) {
+      throw const FormatException('Не более 14 цифр');
+    }
+    final padded = digits.padLeft(kBcdMaxDigits, '0'); // 14 символов
+    final out = Uint8List(kIdLen);
+    for (var i = 0; i < kIdLen; i++) {
+      final hi = padded.codeUnitAt(i * 2) - 0x30;
+      final lo = padded.codeUnitAt(i * 2 + 1) - 0x30;
+      out[i] = (hi << 4) | lo;
+    }
+    return out;
+  }
+
+  /// Обратное преобразование 7-байт BCD в строку цифр (для отладки/UI).
+  /// Ведущие нули убираются.
+  static String identifierToPhone(Uint8List id) {
+    final sb = StringBuffer();
+    for (final b in id) {
+      sb.write(((b >> 4) & 0xF).toString());
+      sb.write((b & 0xF).toString());
+    }
+    final s = sb.toString().replaceFirst(RegExp(r'^0+'), '');
+    return s.isEmpty ? '0' : s;
   }
 
   /// Парсит номер замка: '7702' / '0x7702' → int (трактуем как hex).
@@ -208,6 +222,7 @@ class StownConfig {
     this.macValue = '',
     this.uuidValue = '',
     this.phoneValue = '',
+    this.imeiValue = '',
     this.locks = const [],
     this.selectedLock = 0,
     this.wrapper = WrapperFormat.manufacturer,
@@ -222,6 +237,7 @@ class StownConfig {
   final String macValue;
   final String uuidValue;
   final String phoneValue;
+  final String imeiValue;
   final List<GateLock> locks;
   final int selectedLock;
   final WrapperFormat wrapper;
@@ -236,6 +252,7 @@ class StownConfig {
         IdentifierMode.mac => macValue,
         IdentifierMode.uuid => uuidValue,
         IdentifierMode.phone => phoneValue,
+        IdentifierMode.imei => imeiValue,
       };
 
   Map<String, dynamic> toJson() => {
@@ -245,6 +262,7 @@ class StownConfig {
         'macValue': macValue,
         'uuidValue': uuidValue,
         'phoneValue': phoneValue,
+        'imeiValue': imeiValue,
         'locks': locks.map((l) => l.toJson()).toList(),
         'selectedLock': selectedLock,
         'wrapper': wrapper.storageName,
@@ -260,6 +278,7 @@ class StownConfig {
         macValue: j['macValue'] as String? ?? '',
         uuidValue: j['uuidValue'] as String? ?? '',
         phoneValue: j['phoneValue'] as String? ?? '',
+        imeiValue: j['imeiValue'] as String? ?? '',
         locks: (j['locks'] as List? ?? [])
             .map((e) => GateLock.fromJson(e as Map<String, dynamic>))
             .toList(),
@@ -285,6 +304,7 @@ class StownConfig {
     String? macValue,
     String? uuidValue,
     String? phoneValue,
+    String? imeiValue,
     List<GateLock>? locks,
     int? selectedLock,
     WrapperFormat? wrapper,
@@ -299,6 +319,7 @@ class StownConfig {
         macValue: macValue ?? this.macValue,
         uuidValue: uuidValue ?? this.uuidValue,
         phoneValue: phoneValue ?? this.phoneValue,
+        imeiValue: imeiValue ?? this.imeiValue,
         locks: locks ?? this.locks,
         selectedLock: selectedLock ?? this.selectedLock,
         wrapper: wrapper ?? this.wrapper,

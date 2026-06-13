@@ -5,12 +5,12 @@ import 'dart:typed_data';
 
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:http/http.dart' as http;
-import 'package:mqtt_client/mqtt_client.dart';
-import 'package:mqtt_client/mqtt_server_client.dart';
 
 import '../models/beacon.dart';
 import '../models/gateway.dart';
+import '../models/stown_packet.dart';
 import 'beacon_parser.dart';
+import 'hm10_sender.dart';
 
 /// Сервис мониторинга у шлагбаума: сканирует BLE, проверяет авторизацию,
 /// отправляет сигнал в выбранном транспорте (HTTP / TCP / MQTT).
@@ -55,15 +55,17 @@ class GatewayMonitor {
       }
 
       _scanSub = FlutterBluePlus.scanResults.listen(_onResults);
-      await FlutterBluePlus.startScan(
-        continuousUpdates: true,
-        removeIfGone: const Duration(seconds: 10),
-      );
+      await _beginScan();
     } catch (e) {
       _emit(EventLevel.error, 'Ошибка запуска: $e');
       _running = false;
     }
   }
+
+  Future<void> _beginScan() => FlutterBluePlus.startScan(
+        continuousUpdates: true,
+        removeIfGone: const Duration(seconds: 10),
+      );
 
   Future<void> stop() async {
     if (!_running) return;
@@ -108,6 +110,11 @@ class GatewayMonitor {
     // STOWN-идентификатор из 10-байтного пакета (любая обёртка, кроме iBeacon).
     final advStownId = stownIdFromAdv(r.advertisementData);
 
+    // Ключ метки для сверки с базой из «Сканера»:
+    // STOWN-метка → "STOWN:ИМЯ", иначе → MAC-адрес.
+    final advName = r.advertisementData.advName;
+    final advKey = advStownId != null ? 'STOWN:$advName' : advMac;
+
     final rssi = r.rssi;
 
     AuthorizedVehicle? vehicle;
@@ -119,6 +126,7 @@ class GatewayMonitor {
         advMajor: advMajor,
         advMinor: advMinor,
         advStownId: advStownId,
+        advKey: advKey,
       )) {
         vehicle = v;
         break;
@@ -142,7 +150,7 @@ class GatewayMonitor {
     window.add(now);
 
     if (window.length >= config.samplesRequired) {
-      _trigger(vehicle, advUuid, advMac, advMajor, advMinor, advStownId, rssi);
+      _trigger(vehicle, advUuid, advMac, advMajor, advMinor, advStownId, advKey, rssi);
       _lastTrigger[key] = now;
       window.clear();
     } else {
@@ -161,6 +169,7 @@ class GatewayMonitor {
     int? advMajor,
     int? advMinor,
     String? advStownId,
+    String? advKey,
     int rssi,
   ) async {
     final matchedFields = vehicle.explainMatch(
@@ -169,6 +178,7 @@ class GatewayMonitor {
       advMajor: advMajor,
       advMinor: advMinor,
       advStownId: advStownId,
+      advKey: advKey,
     );
     _emit(
       EventLevel.success,
@@ -186,17 +196,42 @@ class GatewayMonitor {
       'timestamp': DateTime.now().toIso8601String(),
     };
 
+    // Командные пакеты STOWN: идентификатор метки (если STOWN) + номер замка.
+    final idBytes = _idBytes(advStownId);
+    final lock = _lockNumber();
+    final pkt01 =
+        StownPacket.build(command: 0x01, identifier: idBytes, lockNumber: lock);
+    final pkt87 =
+        StownPacket.build(command: 0x87, identifier: idBytes, lockNumber: lock);
+
     switch (config.transport) {
       case GatewayTransport.http:
         await _sendHttp(info);
         break;
       case GatewayTransport.tcp:
-        await _sendTcp(info);
+        await _sendStownTcp(pkt01, pkt87);
         break;
-      case GatewayTransport.mqtt:
-        await _sendMqtt(info);
+      case GatewayTransport.hm10:
+        await _sendStownHm10(pkt01, pkt87);
         break;
     }
+  }
+
+  /// 7 байт идентификатора для команды: из hex STOWN-ID метки, иначе нули.
+  Uint8List _idBytes(String? stownIdHex) {
+    final out = Uint8List(7);
+    if (stownIdHex == null) return out;
+    final clean = stownIdHex.replaceAll(RegExp('[^0-9A-Fa-f]'), '');
+    for (var i = 0; i < 7 && i * 2 + 1 < clean.length; i++) {
+      out[i] = int.parse(clean.substring(i * 2, i * 2 + 2), radix: 16);
+    }
+    return out;
+  }
+
+  /// Номер замка из настроек (hex → int, 0..0xFFFF).
+  int _lockNumber() {
+    final s = config.lockHex.trim().replaceAll('0x', '');
+    return (int.tryParse(s, radix: 16) ?? 0) & 0xFFFF;
   }
 
   // ------------------------------------------------------------------ //
@@ -228,18 +263,10 @@ class GatewayMonitor {
   }
 
   // ------------------------------------------------------------------ //
-  // TCP
+  // TCP — две STOWN-команды: 0x01, пауза 500 мс, 0x87.
   // ------------------------------------------------------------------ //
 
-  Future<void> _sendTcp(Map<String, dynamic> info) async {
-    final Uint8List payload;
-    try {
-      payload = _buildTcpPayload(info);
-    } catch (e) {
-      _emit(EventLevel.error, 'TCP payload: $e');
-      return;
-    }
-
+  Future<void> _sendStownTcp(Uint8List pkt01, Uint8List pkt87) async {
     Socket? socket;
     try {
       socket = await Socket.connect(
@@ -247,12 +274,15 @@ class GatewayMonitor {
         config.tcpPort,
         timeout: const Duration(seconds: 5),
       );
-      socket.add(payload);
+      socket.add(pkt01);
       await socket.flush();
-      _emit(
-        EventLevel.success,
-        'TCP: ${payload.length} байт → ${config.tcpHost}:${config.tcpPort}',
-      );
+      _emit(EventLevel.success,
+          'TCP: 0x01 → ${config.tcpHost}:${config.tcpPort}');
+      await Future.delayed(const Duration(milliseconds: 500));
+      socket.add(pkt87);
+      await socket.flush();
+      _emit(EventLevel.success,
+          'TCP: 0x87 → ${config.tcpHost}:${config.tcpPort}');
     } on TimeoutException {
       _emit(EventLevel.error,
           'TCP: таймаут подключения к ${config.tcpHost}:${config.tcpPort}');
@@ -267,97 +297,37 @@ class GatewayMonitor {
     }
   }
 
-  Uint8List _buildTcpPayload(Map<String, dynamic> info) {
-    switch (config.tcpPayloadFormat) {
-      case TcpPayloadFormat.json:
-        return Uint8List.fromList(utf8.encode('${jsonEncode(info)}\n'));
-
-      case TcpPayloadFormat.text:
-        var template = config.tcpPayloadTemplate;
-        // Подставляем все ключи из info как {key}
-        info.forEach((k, v) {
-          template = template.replaceAll('{$k}', v == null ? '' : v.toString());
-        });
-        // Разворачиваем экранированные \n / \r
-        template = template.replaceAll(r'\n', '\n').replaceAll(r'\r', '\r');
-        return Uint8List.fromList(utf8.encode(template));
-
-      case TcpPayloadFormat.hex:
-        final clean = config.tcpPayloadTemplate
-            .replaceAll(' ', '')
-            .replaceAll(':', '')
-            .replaceAll('\n', '')
-            .replaceAll('\r', '');
-        if (clean.length % 2 != 0) {
-          throw FormatException('hex длина должна быть чётной');
-        }
-        final bytes = <int>[];
-        for (var i = 0; i + 1 < clean.length; i += 2) {
-          bytes.add(int.parse(clean.substring(i, i + 2), radix: 16));
-        }
-        return Uint8List.fromList(bytes);
-    }
-  }
-
   // ------------------------------------------------------------------ //
-  // MQTT
+  // HM-10 — подключение по GATT и запись 0x01, пауза 500 мс, 0x87.
   // ------------------------------------------------------------------ //
 
-  Future<void> _sendMqtt(Map<String, dynamic> info) async {
-    final clientId =
-        'ble-gate-${DateTime.now().millisecondsSinceEpoch.toRadixString(36)}';
-    final client = MqttServerClient.withPort(
-      config.mqttHost,
-      clientId,
-      config.mqttPort,
-    );
-    client.keepAlivePeriod = 10;
-    client.logging(on: false);
-    client.setProtocolV311();
-    client.autoReconnect = false;
-
-    final connMess = MqttConnectMessage()
-        .withClientIdentifier(clientId)
-        .startClean()
-        .withWillQos(MqttQos.atMostOnce);
-    if (config.mqttUsername.isNotEmpty) {
-      connMess.authenticateAs(config.mqttUsername, config.mqttPassword);
+  Future<void> _sendStownHm10(Uint8List pkt01, Uint8List pkt87) async {
+    final id = config.hm10Device.trim();
+    if (id.isEmpty) {
+      _emit(EventLevel.error, 'HM-10: не задан адрес устройства в настройках');
+      return;
     }
-    client.connectionMessage = connMess;
-
+    // Подключаться во время скана нельзя — останавливаем, потом возобновим.
     try {
-      await client
-          .connect(
-            config.mqttUsername.isEmpty ? null : config.mqttUsername,
-            config.mqttUsername.isEmpty ? null : config.mqttPassword,
-          )
-          .timeout(const Duration(seconds: 5));
-
-      if (client.connectionStatus?.state != MqttConnectionState.connected) {
-        _emit(EventLevel.error,
-            'MQTT: не подключиться к ${config.mqttHost}:${config.mqttPort}');
-        client.disconnect();
-        return;
-      }
-
-      final builder = MqttClientPayloadBuilder()..addString(jsonEncode(info));
-      client.publishMessage(
-        config.mqttTopic,
-        MqttQos.atMostOnce,
-        builder.payload!,
+      await FlutterBluePlus.stopScan();
+    } catch (_) {}
+    try {
+      final device = BluetoothDevice.fromId(id);
+      await Hm10Sender.instance.sendPackets(
+        device,
+        [pkt01, pkt87],
+        gap: const Duration(milliseconds: 500),
+        onLog: (m) => _emit(EventLevel.info, 'HM-10: $m'),
       );
-      _emit(
-        EventLevel.success,
-        'MQTT: → ${config.mqttHost}:${config.mqttPort} / ${config.mqttTopic}',
-      );
-    } on TimeoutException {
-      _emit(EventLevel.error, 'MQTT: таймаут подключения');
+      _emit(EventLevel.success, 'HM-10: 0x01 и 0x87 отправлены → $id');
     } catch (e) {
-      _emit(EventLevel.error, 'MQTT: $e');
+      _emit(EventLevel.error, 'HM-10: $e');
     } finally {
-      try {
-        client.disconnect();
-      } catch (_) {}
+      if (_running) {
+        try {
+          await _beginScan();
+        } catch (_) {}
+      }
     }
   }
 
