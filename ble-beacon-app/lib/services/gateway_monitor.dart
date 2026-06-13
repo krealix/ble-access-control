@@ -358,16 +358,26 @@ class GatewayMonitor {
   // ------------------------------------------------------------------ //
 
   Future<void> _sendStownHm10(Uint8List pkt01, Uint8List pkt87) async {
-    final id = config.hm10Device.trim();
+    // Android getRemoteDevice требует MAC в ВЕРХНЕМ регистре с двоеточиями,
+    // иначе бросает IllegalArgumentException и подключение не происходит.
+    final id = config.hm10Device.trim().toUpperCase();
     if (id.isEmpty) {
       _emit(EventLevel.error, 'HM-10: не задан адрес устройства в настройках');
       return;
     }
-    // Подключаться во время скана нельзя — останавливаем, потом возобновим.
+    if (!RegExp(r'^([0-9A-F]{2}:){5}[0-9A-F]{2}$').hasMatch(id)) {
+      _emit(EventLevel.error,
+          'HM-10: неверный MAC «$id» — нужен формат AA:BB:CC:DD:EE:FF');
+      return;
+    }
+    // Подключаться во время скана нельзя — останавливаем и даём стеку осесть,
+    // иначе connect по MAC падает сразу после непрерывного сканирования.
     try {
       await FlutterBluePlus.stopScan();
     } catch (_) {}
+    await Future.delayed(const Duration(milliseconds: 400));
     try {
+      _emit(EventLevel.info, 'HM-10: подключение к $id…');
       final device = BluetoothDevice.fromId(id);
       await Hm10Sender.instance.sendPackets(
         device,
