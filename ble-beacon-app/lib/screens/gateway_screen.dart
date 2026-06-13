@@ -46,6 +46,9 @@ class _GatewayScreenState extends State<GatewayScreen> {
   // Общий для TCP/HM-10: номер замка (hex)
   final _lockCtrl = TextEditingController();
 
+  // Свой номер шлюза — подсказка «звонить сюда» для доступа по звонку
+  final _gwNumberCtrl = TextEditingController();
+
   // Selected transport (mirror of config.transport for UI state)
   GatewayTransport _transport = GatewayTransport.http;
 
@@ -71,6 +74,7 @@ class _GatewayScreenState extends State<GatewayScreen> {
     _tcpPortCtrl.dispose();
     _hm10Ctrl.dispose();
     _lockCtrl.dispose();
+    _gwNumberCtrl.dispose();
     super.dispose();
   }
 
@@ -90,6 +94,7 @@ class _GatewayScreenState extends State<GatewayScreen> {
       _tcpPortCtrl.text = cfg.tcpPort.toString();
       _hm10Ctrl.text = cfg.hm10Device;
       _lockCtrl.text = cfg.lockHex;
+      _gwNumberCtrl.text = cfg.gatewayNumber;
       _loaded = true;
     });
   }
@@ -105,6 +110,7 @@ class _GatewayScreenState extends State<GatewayScreen> {
         tcpPort: int.tryParse(_tcpPortCtrl.text.trim()) ?? 9999,
         hm10Device: _hm10Ctrl.text.trim(),
         lockHex: _lockCtrl.text.trim().isEmpty ? '7702' : _lockCtrl.text.trim(),
+        gatewayNumber: _gwNumberCtrl.text.trim(),
       );
 
   Future<void> _saveConfig() async {
@@ -561,6 +567,10 @@ class _GatewayScreenState extends State<GatewayScreen> {
             child: ListView(
               padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
               children: [
+                if (_config.gatewayNumber.trim().isNotEmpty) ...[
+                  _callHintBanner(),
+                  const SizedBox(height: 12),
+                ],
                 _settingsCard(),
                 const SizedBox(height: 12),
                 _vehiclesCard(),
@@ -581,6 +591,45 @@ class _GatewayScreenState extends State<GatewayScreen> {
                 onPressed: _toggle,
                 color: _running ? AppColors.danger : null,
               ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Заметная плашка «звонить сюда» для доступа по звонку.
+  Widget _callHintBanner() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: AppColors.primary.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: AppColors.primary),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.phone_in_talk, color: AppColors.primary, size: 26),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Для открытия звонком набирайте:',
+                  style: TextStyle(color: AppColors.onSurfaceMuted, fontSize: 12),
+                ),
+                const SizedBox(height: 2),
+                SelectableText(
+                  _config.gatewayNumber,
+                  style: const TextStyle(
+                    color: AppColors.onSurface,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w700,
+                    fontFamily: 'monospace',
+                  ),
+                ),
+              ],
             ),
           ),
         ],
@@ -652,6 +701,14 @@ class _GatewayScreenState extends State<GatewayScreen> {
                 ),
               ),
             ],
+          ),
+          const SizedBox(height: 12),
+          _textField(
+            _gwNumberCtrl,
+            'Номер шлюза',
+            hint: 'Свой номер этого телефона для подсказки «звонить сюда» '
+                '(доступ по звонку). На открытие не влияет.',
+            icon: Icons.sim_card_outlined,
           ),
         ],
       ),

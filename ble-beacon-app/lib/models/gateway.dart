@@ -211,6 +211,8 @@ class GatewayConfig {
     this.hm10Device = '',
     // Общий для TCP и HM-10: номер замка (hex), напр. 7702
     this.lockHex = '7702',
+    // Свой номер шлюза — подсказка «звонить сюда» для доступа по звонку.
+    this.gatewayNumber = '',
   });
 
   // Общие
@@ -236,6 +238,9 @@ class GatewayConfig {
   // Номер замка (hex) для STOWN-команд TCP/HM-10
   final String lockHex;
 
+  // Свой номер шлюза (подсказка «звонить сюда» при доступе по звонку)
+  final String gatewayNumber;
+
   String get webhookUrl {
     final base = haUrl.replaceAll(RegExp(r'/+$'), '');
     return '$base/api/webhook/$webhookId';
@@ -253,6 +258,7 @@ class GatewayConfig {
         'tcpPort': tcpPort,
         'hm10Device': hm10Device,
         'lockHex': lockHex,
+        'gatewayNumber': gatewayNumber,
       };
 
   /// Загрузка с учётом старого формата (где был beaconUuid на уровне config).
@@ -295,6 +301,7 @@ class GatewayConfig {
       tcpPort: j['tcpPort'] as int? ?? 9999,
       hm10Device: j['hm10Device'] as String? ?? '',
       lockHex: j['lockHex'] as String? ?? '7702',
+      gatewayNumber: j['gatewayNumber'] as String? ?? '',
     );
   }
 
@@ -317,6 +324,7 @@ class GatewayConfig {
     int? tcpPort,
     String? hm10Device,
     String? lockHex,
+    String? gatewayNumber,
   }) =>
       GatewayConfig(
         rssiThreshold: rssiThreshold ?? this.rssiThreshold,
@@ -330,6 +338,7 @@ class GatewayConfig {
         tcpPort: tcpPort ?? this.tcpPort,
         hm10Device: hm10Device ?? this.hm10Device,
         lockHex: lockHex ?? this.lockHex,
+        gatewayNumber: gatewayNumber ?? this.gatewayNumber,
       );
 }
 
