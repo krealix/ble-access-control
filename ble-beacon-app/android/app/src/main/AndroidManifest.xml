@@ -17,6 +17,11 @@
 
     <!-- Webhook к Home Assistant -->
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Доступ по звонку (Вариант А): шлюз ловит входящий и читает номер.
+         READ_CALL_LOG нужен с Android 9, чтобы номер входящего не был скрыт. -->
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <uses-permission android:name="android.permission.READ_CALL_LOG" />
     <!-- Чтобы запросы по локальному IP без HTTPS работали (см. ниже про cleartext) -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- Wakelock для шлюзового режима -->

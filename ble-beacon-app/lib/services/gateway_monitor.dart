@@ -11,6 +11,7 @@ import '../models/gateway.dart';
 import '../models/stown_packet.dart';
 import 'beacon_parser.dart';
 import 'hm10_sender.dart';
+import 'incoming_call.dart';
 
 /// Сервис мониторинга у шлагбаума: сканирует BLE, проверяет авторизацию,
 /// отправляет сигнал в выбранном транспорте (HTTP / TCP / MQTT).
@@ -31,6 +32,7 @@ class GatewayMonitor {
   bool get isRunning => _running;
 
   StreamSubscription<List<ScanResult>>? _scanSub;
+  StreamSubscription<String>? _callSub;
 
   /// Окно последних попаданий per-vehicle (для anti-flicker через samples).
   final Map<String, List<DateTime>> _hits = {};
@@ -56,6 +58,16 @@ class GatewayMonitor {
 
       _scanSub = FlutterBluePlus.scanResults.listen(_onResults);
       await _beginScan();
+
+      // Доступ по звонку (Вариант А): слушаем входящие вызовы, только если
+      // в белом списке есть запись-телефон (ключ PHONE:...).
+      final hasPhone = config.whitelist
+          .any((v) => (v.matchKey ?? '').toUpperCase().startsWith('PHONE:'));
+      if (hasPhone) {
+        await IncomingCall.requestPermissions();
+        _callSub = IncomingCall.instance.numbers.listen(_onIncomingCall);
+        _emit(EventLevel.info, 'Доступ по звонку включён');
+      }
     } catch (e) {
       _emit(EventLevel.error, 'Ошибка запуска: $e');
       _running = false;
@@ -75,6 +87,8 @@ class GatewayMonitor {
     } catch (_) {}
     await _scanSub?.cancel();
     _scanSub = null;
+    await _callSub?.cancel();
+    _callSub = null;
     _hits.clear();
     _emit(EventLevel.info, 'Мониторинг остановлен');
   }
@@ -196,7 +210,15 @@ class GatewayMonitor {
       'timestamp': DateTime.now().toIso8601String(),
     };
 
-    // Командные пакеты STOWN: идентификатор метки (если STOWN) + номер замка.
+    await _openFor(advStownId: advStownId, info: info);
+  }
+
+  /// Открытие выбранным транспортом: HTTP шлёт JSON [info]; TCP/HM-10 — две
+  /// STOWN-команды (0x01, пауза 500 мс, 0x87) с id метки (или нулями) и замком.
+  Future<void> _openFor({
+    String? advStownId,
+    required Map<String, dynamic> info,
+  }) async {
     final idBytes = _idBytes(advStownId);
     final lock = _lockNumber();
     final pkt01 =
@@ -215,6 +237,40 @@ class GatewayMonitor {
         await _sendStownHm10(pkt01, pkt87);
         break;
     }
+  }
+
+  /// Входящий звонок (Вариант А): сверяем номер с белым списком по ключу
+  /// PHONE:<последние 10 цифр>. RSSI/окно проб не применяются — это явное
+  /// действие; только cooldown.
+  void _onIncomingCall(String last10) {
+    final advKey = 'PHONE:$last10';
+    AuthorizedVehicle? vehicle;
+    for (final v in config.whitelist) {
+      if (v.isValid && v.matches(advKey: advKey)) {
+        vehicle = v;
+        break;
+      }
+    }
+    if (vehicle == null) {
+      _emit(EventLevel.info, 'Звонок не из базы: …$last10');
+      return;
+    }
+
+    final now = DateTime.now();
+    final last = _lastTrigger[vehicle.name];
+    if (last != null &&
+        now.difference(last).inSeconds < config.cooldownSeconds) {
+      return;
+    }
+    _lastTrigger[vehicle.name] = now;
+
+    _emit(EventLevel.success, 'Открытие (звонок): ${vehicle.name} · …$last10');
+    _openFor(info: <String, dynamic>{
+      'vehicle': vehicle.name,
+      'source': 'call',
+      'phone': last10,
+      'timestamp': now.toIso8601String(),
+    });
   }
 
   /// 7 байт идентификатора для команды: из hex STOWN-ID метки, иначе нули.

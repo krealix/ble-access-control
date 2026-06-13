@@ -8,6 +8,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import '../models/gateway.dart';
 import '../services/gateway_monitor.dart';
 import '../services/gateway_storage.dart';
+import '../services/incoming_call.dart';
 import '../theme.dart';
 import '../widgets/common.dart';
 
@@ -219,6 +220,12 @@ class _GatewayScreenState extends State<GatewayScreen> {
     final minorCtrl = TextEditingController(
         text: existing?.minor?.toString() ?? '');
     final stownIdCtrl = TextEditingController(text: existing?.stownId ?? '');
+    // Телефон для доступа по звонку: префилл из matchKey "PHONE:..." если есть.
+    final phoneCtrl = TextEditingController(
+      text: (existing?.matchKey ?? '').startsWith('PHONE:')
+          ? existing!.matchKey!.substring('PHONE:'.length)
+          : '',
+    );
     String? error;
 
     final result = await showDialog<Object?>(
@@ -334,6 +341,22 @@ class _GatewayScreenState extends State<GatewayScreen> {
                     helperMaxLines: 3,
                   ),
                 ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: phoneCtrl,
+                  keyboardType: TextInputType.phone,
+                  style: const TextStyle(
+                      color: AppColors.onSurface, fontFamily: 'monospace'),
+                  decoration: const InputDecoration(
+                    labelText: 'Телефон',
+                    prefixIcon: Icon(Icons.phone_outlined),
+                    helperText:
+                        'Доступ по звонку: открытие при входящем с этого номера. Сверка по последним 10 цифрам.',
+                    helperStyle: TextStyle(
+                        color: AppColors.onSurfaceMuted, fontSize: 11),
+                    helperMaxLines: 3,
+                  ),
+                ),
                 if (error != null) ...[
                   const SizedBox(height: 8),
                   Text(error!,
@@ -412,13 +435,22 @@ class _GatewayScreenState extends State<GatewayScreen> {
                     return;
                   }
                 }
+                // Телефон → ключ PHONE:<последние 10 цифр>. Если поле пустое —
+                // сохраняем прежний matchKey (например, STOWN:/MAC из «Сканера»).
+                final phoneDigits = normalizePhone(phoneCtrl.text);
+                final matchKey = phoneDigits.isNotEmpty
+                    ? 'PHONE:$phoneDigits'
+                    : ((existing?.matchKey ?? '').startsWith('PHONE:')
+                        ? null
+                        : existing?.matchKey);
                 if (uuid == null &&
                     mac == null &&
                     major == null &&
                     minor == null &&
-                    stownId == null) {
+                    stownId == null &&
+                    (matchKey == null || matchKey.isEmpty)) {
                   setLocal(() => error =
-                      'Заполните хотя бы один идентификатор: UUID, MAC, Major, Minor или STOWN ID');
+                      'Заполните хотя бы один идентификатор: UUID, MAC, Major, Minor, STOWN ID или Телефон');
                   return;
                 }
                 Navigator.pop(
@@ -430,6 +462,7 @@ class _GatewayScreenState extends State<GatewayScreen> {
                     major: major,
                     minor: minor,
                     stownId: stownId,
+                    matchKey: matchKey,
                   ),
                 );
               },

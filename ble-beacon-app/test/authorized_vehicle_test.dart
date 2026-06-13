@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ble_beacon_app/models/gateway.dart';
+import 'package:ble_beacon_app/services/incoming_call.dart';
 
 void main() {
   group('AuthorizedVehicle сверка по STOWN ID', () {
@@ -44,6 +45,16 @@ void main() {
       final byMac = AuthorizedVehicle(name: 'Авто', matchKey: 'C0:1A:22:33:44:55');
       expect(byMac.matches(advKey: 'c0:1a:22:33:44:55'), isTrue); // регистр не важен
       expect(byMac.matches(advKey: 'FF:FF:FF:FF:FF:FF'), isFalse);
+    });
+
+    test('доступ по звонку: нормализация номера и PHONE-ключ', () {
+      // +7 и 8 приводятся к одним последним 10 цифрам
+      expect(normalizePhone('+7 (999) 123-45-67'), '9991234567');
+      expect(normalizePhone('89991234567'), '9991234567');
+      final v = AuthorizedVehicle(name: 'Авто', matchKey: 'PHONE:9991234567');
+      expect(v.matches(advKey: 'PHONE:9991234567'), isTrue);
+      expect(v.matches(advKey: 'PHONE:0000000000'), isFalse);
+      expect(v.explainMatch(advKey: 'PHONE:9991234567'), contains('Телефон'));
     });
 
     test('matchKey переживает JSON round-trip', () {

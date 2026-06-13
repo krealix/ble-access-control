@@ -113,7 +113,11 @@ class AuthorizedVehicle {
         matchKey!.isNotEmpty &&
         advKey != null &&
         matchKey!.toUpperCase() == advKey.toUpperCase()) {
-      matched.add(matchKey!.startsWith('STOWN:') ? 'Имя' : 'MAC');
+      matched.add(matchKey!.startsWith('STOWN:')
+          ? 'Имя'
+          : matchKey!.startsWith('PHONE:')
+              ? 'Телефон'
+              : 'MAC');
     }
     if (uuid != null &&
         uuid!.isNotEmpty &&
