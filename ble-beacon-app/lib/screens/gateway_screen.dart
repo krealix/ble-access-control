@@ -27,10 +27,12 @@ class _GatewayScreenState extends State<GatewayScreen> {
   bool _running = false;
   bool _loaded = false;
 
-  // Common
-  final _rssiCtrl = TextEditingController();
-  final _cooldownCtrl = TextEditingController();
-  final _samplesCtrl = TextEditingController();
+  // «Мёртвая зона» (гистерезис) + cooldown для звонков
+  final _rssiNearCtrl = TextEditingController(); // P_close
+  final _rssiFarCtrl = TextEditingController(); // P_dist
+  final _tCloseCtrl = TextEditingController(); // t_close, сек
+  final _tFarCtrl = TextEditingController(); // t_dist, сек
+  final _cooldownCtrl = TextEditingController(); // антидребезг звонков, сек
 
   // HTTP
   final _haUrlCtrl = TextEditingController();
@@ -45,9 +47,6 @@ class _GatewayScreenState extends State<GatewayScreen> {
 
   // Общий для TCP/HM-10: номер замка (hex)
   final _lockCtrl = TextEditingController();
-
-  // Свой номер шлюза — подсказка «звонить сюда» для доступа по звонку
-  final _gwNumberCtrl = TextEditingController();
 
   // Selected transport (mirror of config.transport for UI state)
   GatewayTransport _transport = GatewayTransport.http;
@@ -67,14 +66,15 @@ class _GatewayScreenState extends State<GatewayScreen> {
     WakelockPlus.disable();
     _haUrlCtrl.dispose();
     _webhookCtrl.dispose();
-    _rssiCtrl.dispose();
+    _rssiNearCtrl.dispose();
+    _rssiFarCtrl.dispose();
+    _tCloseCtrl.dispose();
+    _tFarCtrl.dispose();
     _cooldownCtrl.dispose();
-    _samplesCtrl.dispose();
     _tcpHostCtrl.dispose();
     _tcpPortCtrl.dispose();
     _hm10Ctrl.dispose();
     _lockCtrl.dispose();
-    _gwNumberCtrl.dispose();
     super.dispose();
   }
 
@@ -87,22 +87,25 @@ class _GatewayScreenState extends State<GatewayScreen> {
       _transport = cfg.transport;
       _haUrlCtrl.text = cfg.haUrl;
       _webhookCtrl.text = cfg.webhookId;
-      _rssiCtrl.text = cfg.rssiThreshold.toString();
+      _rssiNearCtrl.text = cfg.rssiNear.toString();
+      _rssiFarCtrl.text = cfg.rssiFar.toString();
+      _tCloseCtrl.text = (cfg.tCloseMs ~/ 1000).toString();
+      _tFarCtrl.text = (cfg.tFarMs ~/ 1000).toString();
       _cooldownCtrl.text = cfg.cooldownSeconds.toString();
-      _samplesCtrl.text = cfg.samplesRequired.toString();
       _tcpHostCtrl.text = cfg.tcpHost;
       _tcpPortCtrl.text = cfg.tcpPort.toString();
       _hm10Ctrl.text = cfg.hm10Device;
       _lockCtrl.text = cfg.lockHex;
-      _gwNumberCtrl.text = cfg.gatewayNumber;
       _loaded = true;
     });
   }
 
   GatewayConfig _readForm() => _config.copyWith(
-        rssiThreshold: int.tryParse(_rssiCtrl.text.trim()) ?? -65,
+        rssiNear: int.tryParse(_rssiNearCtrl.text.trim()) ?? -60,
+        rssiFar: int.tryParse(_rssiFarCtrl.text.trim()) ?? -80,
+        tCloseMs: (int.tryParse(_tCloseCtrl.text.trim()) ?? 1) * 1000,
+        tFarMs: (int.tryParse(_tFarCtrl.text.trim()) ?? 3) * 1000,
         cooldownSeconds: int.tryParse(_cooldownCtrl.text.trim()) ?? 10,
-        samplesRequired: int.tryParse(_samplesCtrl.text.trim()) ?? 2,
         transport: _transport,
         haUrl: _haUrlCtrl.text.trim(),
         webhookId: _webhookCtrl.text.trim(),
@@ -110,7 +113,6 @@ class _GatewayScreenState extends State<GatewayScreen> {
         tcpPort: int.tryParse(_tcpPortCtrl.text.trim()) ?? 9999,
         hm10Device: _hm10Ctrl.text.trim(),
         lockHex: _lockCtrl.text.trim().isEmpty ? '7702' : _lockCtrl.text.trim(),
-        gatewayNumber: _gwNumberCtrl.text.trim(),
       );
 
   Future<void> _saveConfig() async {
@@ -143,6 +145,13 @@ class _GatewayScreenState extends State<GatewayScreen> {
       setState(() => _running = false);
       return;
     }
+
+    // Подтягиваем актуальный белый список из хранилища — он мог измениться
+    // во вкладке «Сканер» (добавление ТС без перезапуска приложения).
+    try {
+      final stored = await GatewayStorage.instance.load();
+      _config = _config.copyWith(whitelist: stored.whitelist);
+    } catch (_) {}
 
     // Валидация перед стартом
     final cfg = _readForm();
@@ -567,10 +576,6 @@ class _GatewayScreenState extends State<GatewayScreen> {
             child: ListView(
               padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
               children: [
-                if (_config.gatewayNumber.trim().isNotEmpty) ...[
-                  _callHintBanner(),
-                  const SizedBox(height: 12),
-                ],
                 _settingsCard(),
                 const SizedBox(height: 12),
                 _vehiclesCard(),
@@ -598,44 +603,6 @@ class _GatewayScreenState extends State<GatewayScreen> {
     );
   }
 
-  /// Заметная плашка «звонить сюда» для доступа по звонку.
-  Widget _callHintBanner() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-      decoration: BoxDecoration(
-        color: AppColors.primary.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: AppColors.primary),
-      ),
-      child: Row(
-        children: [
-          const Icon(Icons.phone_in_talk, color: AppColors.primary, size: 26),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Для открытия звонком набирайте:',
-                  style: TextStyle(color: AppColors.onSurfaceMuted, fontSize: 12),
-                ),
-                const SizedBox(height: 2),
-                SelectableText(
-                  _config.gatewayNumber,
-                  style: const TextStyle(
-                    color: AppColors.onSurface,
-                    fontSize: 18,
-                    fontWeight: FontWeight.w700,
-                    fontFamily: 'monospace',
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 
   Widget _settingsCard() {
     return StownCard(
@@ -669,15 +636,25 @@ class _GatewayScreenState extends State<GatewayScreen> {
           const Divider(color: AppColors.divider, height: 1),
           const SizedBox(height: 12),
 
-          // ---- Common fields ----
+          // ---- «Мёртвая зона» (гистерезис открытия) ----
+          const Text(
+            'ОПРЕДЕЛЕНИЕ ОТКРЫТИЯ (МЁРТВАЯ ЗОНА)',
+            style: TextStyle(
+              color: AppColors.onSurfaceMuted,
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 1.0,
+            ),
+          ),
+          const SizedBox(height: 6),
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Expanded(
                 child: _textField(
-                  _rssiCtrl,
-                  'RSSI',
-                  hint: '-65 dBm ≈ 5–10 м',
+                  _rssiNearCtrl,
+                  'RSSI рядом',
+                  hint: 'P_close, напр. -60',
                   numeric: true,
                   allowNegative: true,
                 ),
@@ -685,30 +662,45 @@ class _GatewayScreenState extends State<GatewayScreen> {
               const SizedBox(width: 8),
               Expanded(
                 child: _textField(
-                  _cooldownCtrl,
-                  'Cooldown',
-                  hint: 'сек до повтора',
+                  _rssiFarCtrl,
+                  'RSSI далеко',
+                  hint: 'P_dist, напр. -80',
                   numeric: true,
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: _textField(
-                  _samplesCtrl,
-                  'Samples',
-                  hint: 'для anti-flicker',
-                  numeric: true,
+                  allowNegative: true,
                 ),
               ),
             ],
           ),
           const SizedBox(height: 12),
-          _textField(
-            _gwNumberCtrl,
-            'Номер шлюза',
-            hint: 'Свой номер этого телефона для подсказки «звонить сюда» '
-                '(доступ по звонку). На открытие не влияет.',
-            icon: Icons.sim_card_outlined,
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: _textField(_tCloseCtrl, 't рядом, с',
+                    hint: 'держать', numeric: true),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _textField(_tFarCtrl, 't далеко, с',
+                    hint: 'перевзвод', numeric: true),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _textField(_cooldownCtrl, 'Звонок, с',
+                    hint: 'антидребезг', numeric: true),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            'Открытие — когда метка подошла ближе «RSSI рядом» на «t рядом». '
+            'Повторно — только после отдаления за «RSSI далеко» на «t далеко» '
+            'или пропадания из зоны.',
+            style: TextStyle(
+              color: AppColors.onSurfaceMuted,
+              fontSize: 11,
+              height: 1.4,
+            ),
           ),
         ],
       ),
@@ -857,6 +849,16 @@ class _GatewayScreenState extends State<GatewayScreen> {
     return url.replaceAll(RegExp(r'/+$'), '');
   }
 
+  /// Перечитывает белый список из хранилища (метки, добавленные во вкладке
+  /// «Сканер») и применяет к работающему монитору — без перезапуска приложения.
+  Future<void> _reloadWhitelist() async {
+    final stored = await GatewayStorage.instance.load();
+    if (!mounted) return;
+    setState(() => _config = _config.copyWith(whitelist: stored.whitelist));
+    if (_running) _monitor.updateConfig(_readForm());
+    _snack('Список ТС обновлён: ${stored.whitelist.length}');
+  }
+
   Widget _vehiclesCard() {
     return StownCard(
       child: Column(
@@ -869,6 +871,11 @@ class _GatewayScreenState extends State<GatewayScreen> {
                   icon: Icons.directions_car,
                   text: 'Авторизованные ТС',
                 ),
+              ),
+              IconButton(
+                icon: const Icon(Icons.refresh, color: AppColors.primary),
+                tooltip: 'Обновить из «Сканера»',
+                onPressed: _reloadWhitelist,
               ),
               IconButton(
                 icon: const Icon(Icons.add_circle_outline,

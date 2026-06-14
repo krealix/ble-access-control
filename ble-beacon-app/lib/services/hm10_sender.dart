@@ -19,6 +19,79 @@ class Hm10Sender {
   /// Имена под которыми обычно вещает HM-10 (для подсветки в скане).
   static const nameHints = ['hmsoft', 'hm-10', 'hm10', 'bt05', 'mlt-bt05', 'jdy'];
 
+  // --- Постоянное подключение (для шлюза) ---
+  BluetoothDevice? _persistentDevice;
+  BluetoothCharacteristic? _persistentChar;
+  StreamSubscription<BluetoothConnectionState>? _connSub;
+
+  bool get persistentConnected =>
+      _persistentChar != null && (_persistentDevice?.isConnected ?? false);
+
+  /// Устанавливает (или восстанавливает) постоянное подключение к [mac]
+  /// и кэширует write-характеристику. Совместимо с активным сканированием.
+  Future<void> ensureConnected(String mac, {void Function(String)? onLog}) async {
+    final id = mac.trim().toUpperCase();
+    if (persistentConnected && _persistentDevice!.remoteId.str == id) return;
+    await disconnectPersistent();
+
+    final device = BluetoothDevice.fromId(id);
+    onLog?.call('Подключение к $id…');
+    await device.connect(timeout: const Duration(seconds: 15));
+
+    final services = await device.discoverServices();
+    BluetoothCharacteristic? target;
+    BluetoothCharacteristic? fallback;
+    for (final s in services) {
+      for (final c in s.characteristics) {
+        if (c.uuid == hm10Char) target = c;
+        if ((c.properties.write || c.properties.writeWithoutResponse) &&
+            fallback == null) {
+          fallback = c;
+        }
+      }
+    }
+    target ??= fallback;
+    if (target == null) {
+      try {
+        await device.disconnect();
+      } catch (_) {}
+      throw Hm10Exception('Не найдена характеристика для записи (write)');
+    }
+
+    _persistentDevice = device;
+    _persistentChar = target;
+    _connSub = device.connectionState.listen((st) {
+      if (st == BluetoothConnectionState.disconnected) {
+        _persistentChar = null;
+      }
+    });
+    onLog?.call('Подключено (постоянно)');
+  }
+
+  /// Пишет пакет в постоянное подключение; при обрыве — один реконнект.
+  Future<void> writePersistent(String mac, Uint8List packet,
+      {void Function(String)? onLog}) async {
+    if (!persistentConnected) {
+      await ensureConnected(mac, onLog: onLog);
+    }
+    final c = _persistentChar!;
+    await c.write(packet, withoutResponse: c.properties.writeWithoutResponse);
+    onLog?.call('Отправлено: ${_fmt(packet)}');
+  }
+
+  Future<void> disconnectPersistent() async {
+    await _connSub?.cancel();
+    _connSub = null;
+    _persistentChar = null;
+    final d = _persistentDevice;
+    _persistentDevice = null;
+    if (d != null) {
+      try {
+        await d.disconnect();
+      } catch (_) {}
+    }
+  }
+
   /// Сканирование: возвращает поток результатов (отфильтровать/показать в UI).
   Stream<List<ScanResult>> get scanResults => FlutterBluePlus.scanResults;
 

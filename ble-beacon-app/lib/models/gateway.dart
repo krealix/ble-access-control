@@ -196,10 +196,14 @@ enum GatewayTransport {
 /// Конфигурация шлюзового телефона у шлагбаума.
 class GatewayConfig {
   GatewayConfig({
-    required this.rssiThreshold,
-    required this.cooldownSeconds,
-    required this.samplesRequired,
     required this.whitelist,
+    // Антидребезг для доступа по звонку (BLE использует КА «мёртвой зоны»).
+    this.cooldownSeconds = 10,
+    // Параметры «мёртвой зоны» (гистерезис) для BLE-открытия:
+    this.rssiNear = -60, // P_close: RSSI ≥ этого = «рядом»
+    this.rssiFar = -80, // P_dist: RSSI ≤ этого = «далеко»
+    this.tCloseMs = 1000, // t_close: держаться «рядом» до открытия
+    this.tFarMs = 3000, // t_dist: «далеко»/нет в зоне до перевзвода
     this.transport = GatewayTransport.http,
     // HTTP
     this.haUrl = 'http://192.168.0.10:8123',
@@ -211,15 +215,17 @@ class GatewayConfig {
     this.hm10Device = '',
     // Общий для TCP и HM-10: номер замка (hex), напр. 7702
     this.lockHex = '7702',
-    // Свой номер шлюза — подсказка «звонить сюда» для доступа по звонку.
-    this.gatewayNumber = '',
   });
 
   // Общие
-  final int rssiThreshold;
-  final int cooldownSeconds;
-  final int samplesRequired;
   final List<AuthorizedVehicle> whitelist;
+  final int cooldownSeconds;
+
+  // «Мёртвая зона» (гистерезис) для BLE-открытия
+  final int rssiNear; // P_close
+  final int rssiFar; // P_dist
+  final int tCloseMs; // t_close
+  final int tFarMs; // t_dist
 
   // Транспорт
   final GatewayTransport transport;
@@ -238,18 +244,17 @@ class GatewayConfig {
   // Номер замка (hex) для STOWN-команд TCP/HM-10
   final String lockHex;
 
-  // Свой номер шлюза (подсказка «звонить сюда» при доступе по звонку)
-  final String gatewayNumber;
-
   String get webhookUrl {
     final base = haUrl.replaceAll(RegExp(r'/+$'), '');
     return '$base/api/webhook/$webhookId';
   }
 
   Map<String, dynamic> toJson() => {
-        'rssiThreshold': rssiThreshold,
         'cooldownSeconds': cooldownSeconds,
-        'samplesRequired': samplesRequired,
+        'rssiNear': rssiNear,
+        'rssiFar': rssiFar,
+        'tCloseMs': tCloseMs,
+        'tFarMs': tFarMs,
         'whitelist': whitelist.map((v) => v.toJson()).toList(),
         'transport': transport.name,
         'haUrl': haUrl,
@@ -258,7 +263,6 @@ class GatewayConfig {
         'tcpPort': tcpPort,
         'hm10Device': hm10Device,
         'lockHex': lockHex,
-        'gatewayNumber': gatewayNumber,
       };
 
   /// Загрузка с учётом старого формата (где был beaconUuid на уровне config).
@@ -290,10 +294,12 @@ class GatewayConfig {
     }
 
     return GatewayConfig(
-      rssiThreshold: j['rssiThreshold'] as int? ?? -65,
-      cooldownSeconds: j['cooldownSeconds'] as int? ?? 10,
-      samplesRequired: j['samplesRequired'] as int? ?? 2,
       whitelist: whitelist,
+      cooldownSeconds: j['cooldownSeconds'] as int? ?? 10,
+      rssiNear: j['rssiNear'] as int? ?? -60,
+      rssiFar: j['rssiFar'] as int? ?? -80,
+      tCloseMs: j['tCloseMs'] as int? ?? 1000,
+      tFarMs: j['tFarMs'] as int? ?? 3000,
       transport: transport,
       haUrl: j['haUrl'] as String? ?? 'http://192.168.0.10:8123',
       webhookId: j['webhookId'] as String? ?? 'gate_open',
@@ -301,22 +307,18 @@ class GatewayConfig {
       tcpPort: j['tcpPort'] as int? ?? 9999,
       hm10Device: j['hm10Device'] as String? ?? '',
       lockHex: j['lockHex'] as String? ?? '7702',
-      gatewayNumber: j['gatewayNumber'] as String? ?? '',
     );
   }
 
-  static GatewayConfig get defaults => GatewayConfig(
-        rssiThreshold: -65,
-        cooldownSeconds: 10,
-        samplesRequired: 2,
-        whitelist: [],
-      );
+  static GatewayConfig get defaults => GatewayConfig(whitelist: []);
 
   GatewayConfig copyWith({
-    int? rssiThreshold,
-    int? cooldownSeconds,
-    int? samplesRequired,
     List<AuthorizedVehicle>? whitelist,
+    int? cooldownSeconds,
+    int? rssiNear,
+    int? rssiFar,
+    int? tCloseMs,
+    int? tFarMs,
     GatewayTransport? transport,
     String? haUrl,
     String? webhookId,
@@ -324,13 +326,14 @@ class GatewayConfig {
     int? tcpPort,
     String? hm10Device,
     String? lockHex,
-    String? gatewayNumber,
   }) =>
       GatewayConfig(
-        rssiThreshold: rssiThreshold ?? this.rssiThreshold,
-        cooldownSeconds: cooldownSeconds ?? this.cooldownSeconds,
-        samplesRequired: samplesRequired ?? this.samplesRequired,
         whitelist: whitelist ?? this.whitelist,
+        cooldownSeconds: cooldownSeconds ?? this.cooldownSeconds,
+        rssiNear: rssiNear ?? this.rssiNear,
+        rssiFar: rssiFar ?? this.rssiFar,
+        tCloseMs: tCloseMs ?? this.tCloseMs,
+        tFarMs: tFarMs ?? this.tFarMs,
         transport: transport ?? this.transport,
         haUrl: haUrl ?? this.haUrl,
         webhookId: webhookId ?? this.webhookId,
@@ -338,7 +341,6 @@ class GatewayConfig {
         tcpPort: tcpPort ?? this.tcpPort,
         hm10Device: hm10Device ?? this.hm10Device,
         lockHex: lockHex ?? this.lockHex,
-        gatewayNumber: gatewayNumber ?? this.gatewayNumber,
       );
 }
 

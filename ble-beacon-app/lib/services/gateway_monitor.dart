@@ -33,11 +33,12 @@ class GatewayMonitor {
 
   StreamSubscription<List<ScanResult>>? _scanSub;
   StreamSubscription<String>? _callSub;
+  Timer? _absenceTimer;
 
-  /// Окно последних попаданий per-vehicle (для anti-flicker через samples).
-  final Map<String, List<DateTime>> _hits = {};
+  /// Состояние «мёртвой зоны» per-vehicle (BLE-открытие).
+  final Map<String, _TagState> _fsm = {};
 
-  /// Когда последний раз триггерили каждую машину (для cooldown).
+  /// Когда последний раз открывали по звонку (cooldown для звонков).
   final Map<String, DateTime> _lastTrigger = {};
 
   Future<void> start() async {
@@ -58,6 +59,9 @@ class GatewayMonitor {
 
       _scanSub = FlutterBluePlus.scanResults.listen(_onResults);
       await _beginScan();
+      _fsm.clear();
+      _absenceTimer = Timer.periodic(
+          const Duration(seconds: 1), (_) => _checkAbsence());
 
       // Доступ по звонку (Вариант А): слушаем входящие вызовы, только если
       // в белом списке есть запись-телефон (ключ PHONE:...).
@@ -67,6 +71,17 @@ class GatewayMonitor {
         await IncomingCall.requestPermissions();
         _callSub = IncomingCall.instance.numbers.listen(_onIncomingCall);
         _emit(EventLevel.info, 'Доступ по звонку включён');
+      }
+
+      // HM-10: заранее открываем постоянное подключение (если это транспорт),
+      // чтобы открытие было мгновенным и надёжным.
+      if (config.transport == GatewayTransport.hm10 &&
+          config.hm10Device.trim().isNotEmpty) {
+        unawaited(Hm10Sender.instance
+            .ensureConnected(config.hm10Device,
+                onLog: (m) => _emit(EventLevel.info, 'HM-10: $m'))
+            .catchError((Object e) =>
+                _emit(EventLevel.error, 'HM-10: предв. подключение — $e')));
       }
     } catch (e) {
       _emit(EventLevel.error, 'Ошибка запуска: $e');
@@ -89,13 +104,16 @@ class GatewayMonitor {
     _scanSub = null;
     await _callSub?.cancel();
     _callSub = null;
-    _hits.clear();
+    _absenceTimer?.cancel();
+    _absenceTimer = null;
+    _fsm.clear();
+    await Hm10Sender.instance.disconnectPersistent();
     _emit(EventLevel.info, 'Мониторинг остановлен');
   }
 
   void updateConfig(GatewayConfig newConfig) {
     config = newConfig;
-    _hits.clear();
+    _fsm.clear();
     _emit(EventLevel.info, 'Настройки обновлены');
   }
 
@@ -148,31 +166,48 @@ class GatewayMonitor {
     }
     if (vehicle == null) return;
 
-    if (rssi < config.rssiThreshold) return;
-
+    // «Мёртвая зона» (гистерезис): открываем при устойчивом «рядом» из
+    // состояния «далеко/армед»; повторно — только после устойчивого «далеко»
+    // (или пропажи из зоны, см. _checkAbsence). Это убирает постоянные открытия.
     final key = vehicle.name;
     final now = DateTime.now();
+    final st = _fsm.putIfAbsent(key, () => _TagState());
+    st.lastSeen = now;
 
-    final last = _lastTrigger[key];
-    if (last != null &&
-        now.difference(last).inSeconds < config.cooldownSeconds) {
-      return;
-    }
-
-    final window = _hits.putIfAbsent(key, () => []);
-    window.removeWhere((t) => now.difference(t).inSeconds > 5);
-    window.add(now);
-
-    if (window.length >= config.samplesRequired) {
-      _trigger(vehicle, advUuid, advMac, advMajor, advMinor, advStownId, advKey, rssi);
-      _lastTrigger[key] = now;
-      window.clear();
+    if (rssi >= config.rssiNear) {
+      st.farSince = null;
+      st.nearSince ??= now;
+      if (st.state == _Zone.far &&
+          now.difference(st.nearSince!).inMilliseconds >= config.tCloseMs) {
+        st.state = _Zone.near;
+        _trigger(vehicle, advUuid, advMac, advMajor, advMinor, advStownId,
+            advKey, rssi);
+      }
+    } else if (rssi <= config.rssiFar) {
+      st.nearSince = null;
+      st.farSince ??= now;
+      if (st.state == _Zone.near &&
+          now.difference(st.farSince!).inMilliseconds >= config.tFarMs) {
+        st.state = _Zone.far;
+        _emit(EventLevel.info, 'Перевзвод: ${vehicle.name} (отошла)');
+      }
     } else {
-      _emit(
-        EventLevel.info,
-        'Кандидат: ${vehicle.name} '
-        '(${window.length}/${config.samplesRequired}, RSSI=$rssi)',
-      );
+      // Между порогами — мёртвая зона: держим состояние, сбрасываем таймеры.
+      st.nearSince = null;
+      st.farSince = null;
+    }
+  }
+
+  /// Периодическая проверка: метка пропала из зоны на ≥ tFarMs → перевзвод.
+  void _checkAbsence() {
+    final now = DateTime.now();
+    for (final st in _fsm.values) {
+      if (st.state == _Zone.near &&
+          now.difference(st.lastSeen).inMilliseconds >= config.tFarMs) {
+        st.state = _Zone.far;
+        st.nearSince = null;
+        st.farSince = null;
+      }
     }
   }
 
@@ -354,12 +389,13 @@ class GatewayMonitor {
   }
 
   // ------------------------------------------------------------------ //
-  // HM-10 — подключение по GATT и запись 0x01, пауза 500 мс, 0x87.
+  // HM-10 — постоянное GATT-подключение, запись 0x01, пауза 500 мс, 0x87.
+  // Постоянное подключение надёжнее, чем connect на каждое открытие, и
+  // сосуществует со сканированием (не нужно его останавливать).
   // ------------------------------------------------------------------ //
 
   Future<void> _sendStownHm10(Uint8List pkt01, Uint8List pkt87) async {
-    // Android getRemoteDevice требует MAC в ВЕРХНЕМ регистре с двоеточиями,
-    // иначе бросает IllegalArgumentException и подключение не происходит.
+    // Android getRemoteDevice требует MAC в ВЕРХНЕМ регистре с двоеточиями.
     final id = config.hm10Device.trim().toUpperCase();
     if (id.isEmpty) {
       _emit(EventLevel.error, 'HM-10: не задан адрес устройства в настройках');
@@ -370,30 +406,14 @@ class GatewayMonitor {
           'HM-10: неверный MAC «$id» — нужен формат AA:BB:CC:DD:EE:FF');
       return;
     }
-    // Подключаться во время скана нельзя — останавливаем и даём стеку осесть,
-    // иначе connect по MAC падает сразу после непрерывного сканирования.
     try {
-      await FlutterBluePlus.stopScan();
-    } catch (_) {}
-    await Future.delayed(const Duration(milliseconds: 400));
-    try {
-      _emit(EventLevel.info, 'HM-10: подключение к $id…');
-      final device = BluetoothDevice.fromId(id);
-      await Hm10Sender.instance.sendPackets(
-        device,
-        [pkt01, pkt87],
-        gap: const Duration(milliseconds: 500),
-        onLog: (m) => _emit(EventLevel.info, 'HM-10: $m'),
-      );
+      void log(String m) => _emit(EventLevel.info, 'HM-10: $m');
+      await Hm10Sender.instance.writePersistent(id, pkt01, onLog: log);
+      await Future.delayed(const Duration(milliseconds: 500));
+      await Hm10Sender.instance.writePersistent(id, pkt87, onLog: log);
       _emit(EventLevel.success, 'HM-10: 0x01 и 0x87 отправлены → $id');
     } catch (e) {
       _emit(EventLevel.error, 'HM-10: $e');
-    } finally {
-      if (_running) {
-        try {
-          await _beginScan();
-        } catch (_) {}
-      }
     }
   }
 
@@ -409,4 +429,15 @@ class GatewayMonitor {
     stop();
     _events.close();
   }
+}
+
+/// Зона метки в гистерезисе.
+enum _Zone { far, near }
+
+/// Состояние «мёртвой зоны» для одной метки.
+class _TagState {
+  _Zone state = _Zone.far; // старт «армед» — первое приближение откроет
+  DateTime? nearSince; // когда RSSI впервые стал ≥ P_close непрерывно
+  DateTime? farSince; // когда RSSI ≤ P_dist непрерывно
+  DateTime lastSeen = DateTime.now();
 }
