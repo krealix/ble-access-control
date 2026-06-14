@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_ble_peripheral/flutter_ble_peripheral.dart';
@@ -5,6 +7,7 @@ import 'package:permission_handler/permission_handler.dart';
 
 import '../models/stown_packet.dart';
 import '../services/bt_info.dart';
+import '../services/rolling_code.dart';
 import '../services/stown_advertiser.dart';
 import '../services/stown_storage.dart';
 import '../theme.dart';
@@ -31,6 +34,11 @@ class _StownScreenState extends State<StownScreen> {
 
   final _idCtrl = TextEditingController();
   final _nameCtrl = TextEditingController();
+  final _secretCtrl = TextEditingController();
+
+  bool _rolling = false;
+  Timer? _rollTimer; // перевещание кода каждые period сек
+  Timer? _tickTimer; // обновление показа текущего кода (1 с)
 
   @override
   void initState() {
@@ -40,8 +48,11 @@ class _StownScreenState extends State<StownScreen> {
 
   @override
   void dispose() {
+    _rollTimer?.cancel();
+    _tickTimer?.cancel();
     _idCtrl.dispose();
     _nameCtrl.dispose();
+    _secretCtrl.dispose();
     super.dispose();
   }
 
@@ -58,16 +69,40 @@ class _StownScreenState extends State<StownScreen> {
           ? StownPacket.generateDeviceId()
           : _config.deviceId;
       _nameCtrl.text = _config.tagName;
+      _rolling = _config.rolling;
+      _secretCtrl.text = _config.secretHex;
       _loaded = true;
     });
+    if (_rolling) _startTick();
+  }
+
+  /// Тикер раз в секунду — чтобы показ текущего rolling-кода обновлялся.
+  void _startTick() {
+    _tickTimer?.cancel();
+    _tickTimer = Timer.periodic(
+        const Duration(seconds: 1), (_) => mounted ? setState(() {}) : null);
+  }
+
+  /// Текущий rolling-код (hex) или null, если секрет некорректен.
+  String? _rollingCodeHex() {
+    final secret = RollingCode.parseSecret(_secretCtrl.text);
+    if (secret.isEmpty) return null;
+    return RollingCode.codeHex(secret);
   }
 
   /// 10 байт для эфира: [0x87][id×7][00 00]. Замок/команда метке не важны —
   /// это лишь носитель идентификатора, который опознаёт шлюз.
   Uint8List? _currentPacket() {
     try {
-      final ident =
-          StownPacket.buildIdentifier(IdentifierMode.deviceId, _idCtrl.text.trim());
+      final Uint8List ident;
+      if (_rolling) {
+        final secret = RollingCode.parseSecret(_secretCtrl.text);
+        if (secret.isEmpty) return null;
+        ident = RollingCode.code(secret);
+      } else {
+        ident = StownPacket.buildIdentifier(
+            IdentifierMode.deviceId, _idCtrl.text.trim());
+      }
       return StownPacket.build(command: kCmdOpen87, identifier: ident, lockNumber: 0);
     } catch (_) {
       return null;
@@ -80,6 +115,8 @@ class _StownScreenState extends State<StownScreen> {
       tagName: _nameCtrl.text.trim(),
       identifierMode: IdentifierMode.deviceId,
       wrapper: WrapperFormat.manufacturer,
+      rolling: _rolling,
+      secretHex: _secretCtrl.text.trim(),
     );
     await StownStorage.instance.save(_config);
     if (mounted) {
@@ -99,6 +136,8 @@ class _StownScreenState extends State<StownScreen> {
 
   Future<void> _toggle() async {
     if (_advertising) {
+      _rollTimer?.cancel();
+      _rollTimer = null;
       try {
         await _advertiser.stop();
       } catch (_) {}
@@ -132,11 +171,29 @@ class _StownScreenState extends State<StownScreen> {
       if (_advertiser.lastNameDropped) {
         _snack('Метка вещается, но без имени — телефон не поддержал имя в пакете');
       }
+      // Rolling: перевещаем новый код каждые period секунд.
+      if (_rolling) {
+        _rollTimer?.cancel();
+        _rollTimer = Timer.periodic(
+            const Duration(seconds: RollingCode.periodSeconds),
+            (_) => _restartRolling());
+      }
     } on PlatformException catch (e) {
       await _showAdvertiseError('код ${e.code} — ${e.message ?? ""}');
     } catch (e) {
       await _showAdvertiseError('$e');
     }
+  }
+
+  /// Перезапуск вещания с новым rolling-кодом (вызывается по таймеру).
+  Future<void> _restartRolling() async {
+    if (!_advertising || !_rolling) return;
+    final packet = _currentPacket();
+    if (packet == null) return;
+    try {
+      await _advertiser.stop();
+      await _advertiser.start(packet, _config);
+    } catch (_) {}
   }
 
   Future<void> _showAdvertiseError(String detail) async {
@@ -263,39 +320,142 @@ class _StownScreenState extends State<StownScreen> {
                           helperMaxLines: 2,
                         ),
                       ),
-                      const SizedBox(height: 16),
-                      const SectionLabel('Идентификатор'),
                       const SizedBox(height: 8),
-                      TextField(
-                        controller: _idCtrl,
-                        enabled: !_advertising,
-                        textCapitalization: TextCapitalization.characters,
-                        inputFormatters: [
-                          FilteringTextInputFormatter.allow(RegExp('[0-9a-fA-F]')),
-                          LengthLimitingTextInputFormatter(14),
-                        ],
-                        onChanged: (_) => setState(() {}),
-                        style: const TextStyle(
-                          color: AppColors.onSurface,
-                          fontFamily: 'monospace',
-                          fontSize: 16,
-                          letterSpacing: 1,
-                        ),
-                        decoration: InputDecoration(
-                          labelText: 'ID',
-                          prefixIcon: const Icon(Icons.fingerprint),
-                          suffixIcon: IconButton(
-                            icon: const Icon(Icons.casino_outlined,
-                                color: AppColors.primary),
-                            tooltip: 'Случайный',
-                            onPressed: _advertising ? null : _newDeviceId,
-                          ),
-                          helperText: '14 hex-символов (7 байт). Уникальный код метки.',
-                          helperStyle: const TextStyle(
-                              color: AppColors.onSurfaceMuted, fontSize: 11),
-                          helperMaxLines: 2,
-                        ),
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        value: _rolling,
+                        activeThumbColor: AppColors.primary,
+                        title: const Text('Динамический код (rolling)',
+                            style: TextStyle(
+                                color: AppColors.onSurface, fontSize: 14)),
+                        subtitle: const Text(
+                            'Защита от клонирования: ID меняется каждые 30 с',
+                            style: TextStyle(
+                                color: AppColors.onSurfaceMuted, fontSize: 11)),
+                        onChanged: _advertising
+                            ? null
+                            : (v) {
+                                setState(() {
+                                  _rolling = v;
+                                  if (v && _secretCtrl.text.trim().isEmpty) {
+                                    _secretCtrl.text =
+                                        RollingCode.generateSecretHex();
+                                  }
+                                });
+                                if (v) {
+                                  _startTick();
+                                } else {
+                                  _tickTimer?.cancel();
+                                }
+                              },
                       ),
+                      const SizedBox(height: 8),
+                      if (!_rolling)
+                        TextField(
+                          controller: _idCtrl,
+                          enabled: !_advertising,
+                          textCapitalization: TextCapitalization.characters,
+                          inputFormatters: [
+                            FilteringTextInputFormatter.allow(
+                                RegExp('[0-9a-fA-F]')),
+                            LengthLimitingTextInputFormatter(14),
+                          ],
+                          onChanged: (_) => setState(() {}),
+                          style: const TextStyle(
+                            color: AppColors.onSurface,
+                            fontFamily: 'monospace',
+                            fontSize: 16,
+                            letterSpacing: 1,
+                          ),
+                          decoration: InputDecoration(
+                            labelText: 'ID',
+                            prefixIcon: const Icon(Icons.fingerprint),
+                            suffixIcon: IconButton(
+                              icon: const Icon(Icons.casino_outlined,
+                                  color: AppColors.primary),
+                              tooltip: 'Случайный',
+                              onPressed: _advertising ? null : _newDeviceId,
+                            ),
+                            helperText:
+                                '14 hex-символов (7 байт). Уникальный код метки.',
+                            helperStyle: const TextStyle(
+                                color: AppColors.onSurfaceMuted, fontSize: 11),
+                            helperMaxLines: 2,
+                          ),
+                        )
+                      else ...[
+                        TextField(
+                          controller: _secretCtrl,
+                          enabled: !_advertising,
+                          textCapitalization: TextCapitalization.characters,
+                          inputFormatters: [
+                            FilteringTextInputFormatter.allow(
+                                RegExp('[0-9a-fA-F]')),
+                          ],
+                          onChanged: (_) => setState(() {}),
+                          style: const TextStyle(
+                            color: AppColors.onSurface,
+                            fontFamily: 'monospace',
+                            fontSize: 14,
+                          ),
+                          decoration: InputDecoration(
+                            labelText: 'Секрет (hex)',
+                            prefixIcon: const Icon(Icons.key_outlined),
+                            suffixIcon: IconButton(
+                              icon: const Icon(Icons.casino_outlined,
+                                  color: AppColors.primary),
+                              tooltip: 'Сгенерировать',
+                              onPressed: _advertising
+                                  ? null
+                                  : () => setState(() => _secretCtrl.text =
+                                      RollingCode.generateSecretHex()),
+                            ),
+                            helperText:
+                                'Тот же секрет введите в шлюзе (карточка ТС). '
+                                'Добавление сканом по ID невозможно.',
+                            helperStyle: const TextStyle(
+                                color: AppColors.onSurfaceMuted, fontSize: 11),
+                            helperMaxLines: 3,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: AppColors.surfaceDim,
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(Icons.timelapse,
+                                  color: AppColors.primary, size: 20),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    const Text('Текущий код',
+                                        style: TextStyle(
+                                            color: AppColors.onSurfaceMuted,
+                                            fontSize: 11)),
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      _rollingCodeHex() ?? '— секрет некорректен —',
+                                      style: const TextStyle(
+                                        color: AppColors.success,
+                                        fontFamily: 'monospace',
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.bold,
+                                        letterSpacing: 1,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
                     ],
                   ),
                 ),

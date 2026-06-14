@@ -13,6 +13,7 @@ import 'beacon_parser.dart';
 import 'gateway_logger.dart';
 import 'hm10_sender.dart';
 import 'incoming_call.dart';
+import 'rolling_code.dart';
 
 /// Сервис мониторинга у шлагбаума: сканирует BLE, проверяет авторизацию,
 /// отправляет сигнал в выбранном транспорте (HTTP / TCP / MQTT).
@@ -153,14 +154,20 @@ class GatewayMonitor {
     AuthorizedVehicle? vehicle;
     for (final v in config.whitelist) {
       if (!v.isValid) continue;
-      if (v.matches(
+      final byStatic = v.matches(
         advUuid: advUuid,
         advMac: advMac,
         advMajor: advMajor,
         advMinor: advMinor,
         advStownId: advStownId,
         advKey: advKey,
-      )) {
+      );
+      // Динамическая метка: сверяем принятый id с rolling-кодом секрета.
+      final byRolling = v.secret != null &&
+          v.secret!.isNotEmpty &&
+          advStownId != null &&
+          RollingCode.matches(v.secret!, advStownId);
+      if (byStatic || byRolling) {
         vehicle = v;
         break;
       }

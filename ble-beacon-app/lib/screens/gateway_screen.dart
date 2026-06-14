@@ -278,6 +278,7 @@ class _GatewayScreenState extends State<GatewayScreen> {
           ? existing!.matchKey!.substring('PHONE:'.length)
           : '',
     );
+    final secretCtrl = TextEditingController(text: existing?.secret ?? '');
     String? error;
 
     final result = await showDialog<Object?>(
@@ -409,6 +410,22 @@ class _GatewayScreenState extends State<GatewayScreen> {
                     helperMaxLines: 3,
                   ),
                 ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: secretCtrl,
+                  textCapitalization: TextCapitalization.characters,
+                  style: const TextStyle(
+                      color: AppColors.onSurface, fontFamily: 'monospace'),
+                  decoration: const InputDecoration(
+                    labelText: 'Секрет (rolling)',
+                    prefixIcon: Icon(Icons.key_outlined),
+                    helperText:
+                        'Для динамической метки: тот же секрет (hex), что в метке. Опознаёт меняющийся код.',
+                    helperStyle: TextStyle(
+                        color: AppColors.onSurfaceMuted, fontSize: 11),
+                    helperMaxLines: 3,
+                  ),
+                ),
                 if (error != null) ...[
                   const SizedBox(height: 8),
                   Text(error!,
@@ -495,14 +512,23 @@ class _GatewayScreenState extends State<GatewayScreen> {
                     : ((existing?.matchKey ?? '').startsWith('PHONE:')
                         ? null
                         : existing?.matchKey);
+                final secret = secretCtrl.text.trim().isEmpty
+                    ? null
+                    : secretCtrl.text.trim().toUpperCase();
+                if (secret != null &&
+                    secret.replaceAll(RegExp('[^0-9A-F]'), '').length < 8) {
+                  setLocal(() => error = 'Секрет: минимум 8 hex-символов');
+                  return;
+                }
                 if (uuid == null &&
                     mac == null &&
                     major == null &&
                     minor == null &&
                     stownId == null &&
-                    (matchKey == null || matchKey.isEmpty)) {
+                    (matchKey == null || matchKey.isEmpty) &&
+                    secret == null) {
                   setLocal(() => error =
-                      'Заполните хотя бы один идентификатор: UUID, MAC, Major, Minor, STOWN ID или Телефон');
+                      'Заполните хотя бы один идентификатор: UUID, MAC, Major, Minor, STOWN ID, Телефон или Секрет');
                   return;
                 }
                 Navigator.pop(
@@ -515,6 +541,7 @@ class _GatewayScreenState extends State<GatewayScreen> {
                     minor: minor,
                     stownId: stownId,
                     matchKey: matchKey,
+                    secret: secret,
                   ),
                 );
               },

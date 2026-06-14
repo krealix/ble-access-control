@@ -229,6 +229,8 @@ class StownConfig {
     this.companyId = 0xFFFF,
     this.serviceUuid = 'FFF0',
     this.tagName = '',
+    this.rolling = false,
+    this.secretHex = '',
   });
 
   final int command;
@@ -246,6 +248,12 @@ class StownConfig {
 
   /// Имя метки (LocalName в рекламе) — показывается в сканере.
   final String tagName;
+
+  /// Динамический идентификатор (rolling-code) вместо статичного.
+  final bool rolling;
+
+  /// Секрет (hex) для rolling-code.
+  final String secretHex;
 
   String identifierValueFor(IdentifierMode mode) => switch (mode) {
         IdentifierMode.deviceId => deviceId,
@@ -269,6 +277,8 @@ class StownConfig {
         'companyId': companyId,
         'serviceUuid': serviceUuid,
         'tagName': tagName,
+        'rolling': rolling,
+        'secretHex': secretHex,
       };
 
   static StownConfig fromJson(Map<String, dynamic> j) => StownConfig(
@@ -287,6 +297,8 @@ class StownConfig {
         companyId: j['companyId'] as int? ?? 0xFFFF,
         serviceUuid: j['serviceUuid'] as String? ?? 'FFF0',
         tagName: j['tagName'] as String? ?? '',
+        rolling: j['rolling'] as bool? ?? false,
+        secretHex: j['secretHex'] as String? ?? '',
       );
 
   static StownConfig get defaults => StownConfig(
@@ -311,6 +323,8 @@ class StownConfig {
     int? companyId,
     String? serviceUuid,
     String? tagName,
+    bool? rolling,
+    String? secretHex,
   }) =>
       StownConfig(
         command: command ?? this.command,

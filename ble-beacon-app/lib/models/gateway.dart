@@ -37,6 +37,7 @@ class AuthorizedVehicle {
     this.minor,
     this.stownId,
     this.matchKey,
+    this.secret,
   });
 
   final String name;
@@ -53,6 +54,10 @@ class AuthorizedVehicle {
   /// Сверяется с ключом, который шлюз вычисляет по рекламе.
   final String? matchKey;
 
+  /// Секрет (hex) для динамической метки (rolling-code). Сверка кода — в
+  /// мониторе (RollingCode.matches), т.к. зависит от времени.
+  final String? secret;
+
   /// Хотя бы одно поле идентификации заполнено.
   bool get isValid =>
       (uuid != null && uuid!.isNotEmpty) ||
@@ -60,7 +65,8 @@ class AuthorizedVehicle {
       major != null ||
       minor != null ||
       (stownId != null && stownId!.isNotEmpty) ||
-      (matchKey != null && matchKey!.isNotEmpty);
+      (matchKey != null && matchKey!.isNotEmpty) ||
+      (secret != null && secret!.isNotEmpty);
 
   /// OR-матчинг: возвращает true если хотя бы одно непустое поле
   /// совпадает с соответствующим полем рекламы.
@@ -160,6 +166,7 @@ class AuthorizedVehicle {
     if (minor != null) parts.add('Minor=$minor');
     if (stownId != null && stownId!.isNotEmpty) parts.add('ID=$stownId');
     if (matchKey != null && matchKey!.isNotEmpty) parts.add(matchKey!);
+    if (secret != null && secret!.isNotEmpty) parts.add('rolling');
     return parts.isEmpty ? '(пусто)' : parts.join('  ');
   }
 
@@ -171,6 +178,7 @@ class AuthorizedVehicle {
         if (minor != null) 'minor': minor,
         if (stownId != null) 'stownId': stownId,
         if (matchKey != null) 'matchKey': matchKey,
+        if (secret != null) 'secret': secret,
       };
 
   static AuthorizedVehicle fromJson(Map<String, dynamic> j) {
@@ -182,6 +190,7 @@ class AuthorizedVehicle {
       minor: j['minor'] as int?,
       stownId: j['stownId'] as String?,
       matchKey: j['matchKey'] as String?,
+      secret: j['secret'] as String?,
     );
   }
 }
@@ -282,6 +291,7 @@ class GatewayConfig {
         minor: map['minor'] as int?,
         stownId: map['stownId'] as String?,
         matchKey: map['matchKey'] as String?,
+        secret: map['secret'] as String?,
       );
     }).toList();
 

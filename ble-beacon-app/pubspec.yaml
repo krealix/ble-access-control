@@ -2,7 +2,7 @@ name: ble_beacon_app
 description: "BLE Beacon Generator and Scanner."
 publish_to: 'none'
 
-version: 1.15.0+16
+version: 1.16.0+17
 
 environment:
   sdk: ^3.11.5
