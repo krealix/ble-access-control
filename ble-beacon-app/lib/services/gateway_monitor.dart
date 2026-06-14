@@ -14,6 +14,7 @@ import 'gateway_logger.dart';
 import 'hm10_sender.dart';
 import 'incoming_call.dart';
 import 'rolling_code.dart';
+import 'trajectory.dart';
 
 /// Сервис мониторинга у шлагбаума: сканирует BLE, проверяет авторизацию,
 /// отправляет сигнал в выбранном транспорте (HTTP / TCP / MQTT).
@@ -40,6 +41,9 @@ class GatewayMonitor {
   /// Состояние «мёртвой зоны» per-vehicle (BLE-открытие).
   final Map<String, _TagState> _fsm = {};
 
+  /// Анализатор траектории per-vehicle (режим decisionMode == 'trajectory').
+  final Map<String, TrajectoryAnalyzer> _traj = {};
+
   /// Когда последний раз открывали по звонку (cooldown для звонков).
   final Map<String, DateTime> _lastTrigger = {};
 
@@ -62,6 +66,7 @@ class GatewayMonitor {
       _scanSub = FlutterBluePlus.scanResults.listen(_onResults);
       await _beginScan();
       _fsm.clear();
+      _traj.clear();
       _absenceTimer = Timer.periodic(
           const Duration(seconds: 1), (_) => _checkAbsence());
 
@@ -109,6 +114,7 @@ class GatewayMonitor {
     _absenceTimer?.cancel();
     _absenceTimer = null;
     _fsm.clear();
+    _traj.clear();
     await Hm10Sender.instance.disconnectPersistent();
     _emit(EventLevel.info, 'Мониторинг остановлен');
   }
@@ -116,6 +122,7 @@ class GatewayMonitor {
   void updateConfig(GatewayConfig newConfig) {
     config = newConfig;
     _fsm.clear();
+    _traj.clear();
     _emit(EventLevel.info, 'Настройки обновлены');
   }
 
@@ -174,14 +181,32 @@ class GatewayMonitor {
     }
     if (vehicle == null) return;
 
-    // «Мёртвая зона» (гистерезис): открываем при устойчивом «рядом» из
-    // состояния «далеко/армед»; повторно — только после устойчивого «далеко»
-    // (или пропажи из зоны, см. _checkAbsence). Это убирает постоянные открытия.
     final key = vehicle.name;
     final now = DateTime.now();
     final st = _fsm.putIfAbsent(key, () => _TagState());
     st.lastSeen = now;
 
+    // Режим «Траектория» (ядро ВКР): Калман → лог-дистанция → тренд (МНК) → КА.
+    // Решение принимается по устойчивому приближению, а не по мгновенному порогу.
+    if (config.decisionMode == 'trajectory') {
+      final an = _traj.putIfAbsent(key, _newAnalyzer);
+      final s = an.push(now.millisecondsSinceEpoch / 1000.0, rssi.toDouble());
+      st.lastRssi = s.rssi.round();
+      // Для карточки живого статуса: «рядом» = доступ выдан/приближается.
+      st.state = (s.state == Access.granted || s.state == Access.approaching)
+          ? _Zone.near
+          : _Zone.far;
+      if (s.justGranted) {
+        _trigger(vehicle, advUuid, advMac, advMajor, advMinor, advStownId,
+            advKey, s.rssi.round());
+      }
+      unawaited(GatewayLogger.instance.rssi(vehicle.name, rssi, s.state.name));
+      return;
+    }
+
+    // «Мёртвая зона» (гистерезис): открываем при устойчивом «рядом» из
+    // состояния «далеко/армед»; повторно — только после устойчивого «далеко»
+    // (или пропажи из зоны, см. _checkAbsence). Это убирает постоянные открытия.
     // EMA-сглаживание: гасит редкие всплески RSSI перед порогами.
     st.ema = st.ema == null
         ? rssi.toDouble()
@@ -227,15 +252,27 @@ class GatewayMonitor {
           ),
       };
 
+  /// Новый анализатор траектории с параметрами из конфигурации.
+  TrajectoryAnalyzer _newAnalyzer() => TrajectoryAnalyzer(
+        grantDistance: config.grantDistance,
+        approachSamples: config.approachSamples,
+        trendEps: config.trendEps,
+        txPower: config.txPower1m,
+        n: config.pathLossN,
+      );
+
   /// Периодическая проверка: метка пропала из зоны на ≥ tFarMs → перевзвод.
   void _checkAbsence() {
     final now = DateTime.now();
-    for (final st in _fsm.values) {
+    for (final e in _fsm.entries) {
+      final st = e.value;
       if (st.state == _Zone.near &&
           now.difference(st.lastSeen).inMilliseconds >= config.tFarMs) {
         st.state = _Zone.far;
         st.nearSince = null;
         st.farSince = null;
+        // Сброс анализатора траектории, чтобы новое приближение перевзвело КА.
+        _traj.remove(e.key);
       }
     }
   }

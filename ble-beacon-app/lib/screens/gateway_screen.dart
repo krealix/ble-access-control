@@ -8,6 +8,7 @@ import 'package:share_plus/share_plus.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../models/gateway.dart';
+import '../services/beacon_parser.dart';
 import '../services/gateway_foreground.dart';
 import '../services/gateway_logger.dart';
 import '../services/gateway_monitor.dart';
@@ -32,12 +33,22 @@ class _GatewayScreenState extends State<GatewayScreen> {
   bool _running = false;
   bool _loaded = false;
 
+  // Алгоритм определения открытия: 'deadZone' | 'trajectory'
+  String _decisionMode = 'deadZone';
+
   // «Мёртвая зона» (гистерезис) + cooldown для звонков
   final _rssiNearCtrl = TextEditingController(); // P_close
   final _rssiFarCtrl = TextEditingController(); // P_dist
   final _tCloseCtrl = TextEditingController(); // t_close, сек
   final _tFarCtrl = TextEditingController(); // t_dist, сек
   final _cooldownCtrl = TextEditingController(); // антидребезг звонков, сек
+
+  // «Траектория» (Калман + лог-дистанция + тренд)
+  final _grantDistCtrl = TextEditingController(); // радиус зоны доступа, м
+  final _approachCtrl = TextEditingController(); // проб «приближается» подряд
+  final _trendEpsCtrl = TextEditingController(); // порог наклона RSSI, dBm/с
+  final _txPowerCtrl = TextEditingController(); // RSSI на 1 м
+  final _pathLossCtrl = TextEditingController(); // показатель затухания n
 
   // HTTP
   final _haUrlCtrl = TextEditingController();
@@ -84,6 +95,11 @@ class _GatewayScreenState extends State<GatewayScreen> {
     _tcpPortCtrl.dispose();
     _hm10Ctrl.dispose();
     _lockCtrl.dispose();
+    _grantDistCtrl.dispose();
+    _approachCtrl.dispose();
+    _trendEpsCtrl.dispose();
+    _txPowerCtrl.dispose();
+    _pathLossCtrl.dispose();
     super.dispose();
   }
 
@@ -94,6 +110,7 @@ class _GatewayScreenState extends State<GatewayScreen> {
       _config = cfg;
       _monitor.updateConfig(cfg);
       _transport = cfg.transport;
+      _decisionMode = cfg.decisionMode;
       _haUrlCtrl.text = cfg.haUrl;
       _webhookCtrl.text = cfg.webhookId;
       _rssiNearCtrl.text = cfg.rssiNear.toString();
@@ -105,16 +122,27 @@ class _GatewayScreenState extends State<GatewayScreen> {
       _tcpPortCtrl.text = cfg.tcpPort.toString();
       _hm10Ctrl.text = cfg.hm10Device;
       _lockCtrl.text = cfg.lockHex;
+      _grantDistCtrl.text = _fmtNum(cfg.grantDistance);
+      _approachCtrl.text = cfg.approachSamples.toString();
+      _trendEpsCtrl.text = _fmtNum(cfg.trendEps);
+      _txPowerCtrl.text = _fmtNum(cfg.txPower1m);
+      _pathLossCtrl.text = _fmtNum(cfg.pathLossN);
       _loaded = true;
     });
   }
 
   GatewayConfig _readForm() => _config.copyWith(
+        decisionMode: _decisionMode,
         rssiNear: int.tryParse(_rssiNearCtrl.text.trim()) ?? -60,
         rssiFar: int.tryParse(_rssiFarCtrl.text.trim()) ?? -80,
         tCloseMs: (int.tryParse(_tCloseCtrl.text.trim()) ?? 1) * 1000,
         tFarMs: (int.tryParse(_tFarCtrl.text.trim()) ?? 3) * 1000,
         cooldownSeconds: int.tryParse(_cooldownCtrl.text.trim()) ?? 10,
+        grantDistance: double.tryParse(_grantDistCtrl.text.trim()) ?? 2.0,
+        approachSamples: int.tryParse(_approachCtrl.text.trim()) ?? 4,
+        trendEps: double.tryParse(_trendEpsCtrl.text.trim()) ?? 0.2,
+        txPower1m: double.tryParse(_txPowerCtrl.text.trim()) ?? -59.0,
+        pathLossN: double.tryParse(_pathLossCtrl.text.trim()) ?? 2.5,
         transport: _transport,
         haUrl: _haUrlCtrl.text.trim(),
         webhookId: _webhookCtrl.text.trim(),
@@ -123,6 +151,10 @@ class _GatewayScreenState extends State<GatewayScreen> {
         hm10Device: _hm10Ctrl.text.trim(),
         lockHex: _lockCtrl.text.trim().isEmpty ? '7702' : _lockCtrl.text.trim(),
       );
+
+  /// Форматирует число без лишнего «.0» (для префилла полей).
+  String _fmtNum(double v) =>
+      v == v.roundToDouble() ? v.toStringAsFixed(0) : v.toString();
 
   Future<void> _saveConfig() async {
     final updated = _readForm();
@@ -230,7 +262,7 @@ class _GatewayScreenState extends State<GatewayScreen> {
         return;
       }
       final path = await GatewayLogger.instance.fileForExport();
-      await Share.shareXFiles([XFile(path)], subject: 'STOWN gateway log');
+      await Share.shareXFiles([XFile(path)], subject: 'Журнал шлюза BLE');
     } catch (e) {
       _snack('Экспорт: $e');
     }
@@ -263,22 +295,27 @@ class _GatewayScreenState extends State<GatewayScreen> {
         EventLevel.error => Icons.error_outline,
       };
 
-  Future<void> _editVehicleDialog([AuthorizedVehicle? existing]) async {
-    final nameCtrl = TextEditingController(text: existing?.name ?? '');
-    final uuidCtrl = TextEditingController(text: existing?.uuid ?? '');
-    final macCtrl = TextEditingController(text: existing?.macAddress ?? '');
-    final majorCtrl = TextEditingController(
-        text: existing?.major?.toString() ?? '');
-    final minorCtrl = TextEditingController(
-        text: existing?.minor?.toString() ?? '');
-    final stownIdCtrl = TextEditingController(text: existing?.stownId ?? '');
+  /// Диалог добавления/редактирования ТС.
+  /// [existing] — редактирование существующего (с кнопкой «Удалить»).
+  /// [template] — префилл полей для нового ТС (например, из встроенного скана).
+  Future<void> _editVehicleDialog(
+      [AuthorizedVehicle? existing, AuthorizedVehicle? template]) async {
+    final src = existing ?? template;
+    final nameCtrl = TextEditingController(text: src?.name ?? '');
+    final uuidCtrl = TextEditingController(text: src?.uuid ?? '');
+    final macCtrl = TextEditingController(text: src?.macAddress ?? '');
+    final majorCtrl =
+        TextEditingController(text: src?.major?.toString() ?? '');
+    final minorCtrl =
+        TextEditingController(text: src?.minor?.toString() ?? '');
+    final stownIdCtrl = TextEditingController(text: src?.stownId ?? '');
     // Телефон для доступа по звонку: префилл из matchKey "PHONE:..." если есть.
     final phoneCtrl = TextEditingController(
-      text: (existing?.matchKey ?? '').startsWith('PHONE:')
-          ? existing!.matchKey!.substring('PHONE:'.length)
+      text: (src?.matchKey ?? '').startsWith('PHONE:')
+          ? src!.matchKey!.substring('PHONE:'.length)
           : '',
     );
-    final secretCtrl = TextEditingController(text: existing?.secret ?? '');
+    final secretCtrl = TextEditingController(text: src?.secret ?? '');
     String? error;
 
     final result = await showDialog<Object?>(
@@ -385,10 +422,10 @@ class _GatewayScreenState extends State<GatewayScreen> {
                   style: const TextStyle(
                       color: AppColors.onSurface, fontFamily: 'monospace'),
                   decoration: const InputDecoration(
-                    labelText: 'STOWN ID',
+                    labelText: 'ID метки',
                     prefixIcon: Icon(Icons.sensors),
                     helperText:
-                        'Идентификатор STOWN-метки (14 hex). Скопируйте поле ID из вкладки «Сканер». Работает в любой обёртке.',
+                        'Идентификатор метки (14 hex). Скопируйте поле ID из вкладки «Сканер». Работает в любой обёртке.',
                     helperStyle: TextStyle(
                         color: AppColors.onSurfaceMuted, fontSize: 11),
                     helperMaxLines: 3,
@@ -500,7 +537,7 @@ class _GatewayScreenState extends State<GatewayScreen> {
                   final n = normalizeId(stownId);
                   if (n.length != 14 ||
                       !RegExp(r'^[0-9A-F]+$').hasMatch(n)) {
-                    setLocal(() => error = 'STOWN ID: 14 hex-символов (7 байт)');
+                    setLocal(() => error = 'ID метки: 14 hex-символов (7 байт)');
                     return;
                   }
                 }
@@ -528,7 +565,7 @@ class _GatewayScreenState extends State<GatewayScreen> {
                     (matchKey == null || matchKey.isEmpty) &&
                     secret == null) {
                   setLocal(() => error =
-                      'Заполните хотя бы один идентификатор: UUID, MAC, Major, Minor, STOWN ID, Телефон или Секрет');
+                      'Заполните хотя бы один идентификатор: UUID, MAC, Major, Minor, ID метки, Телефон или Секрет');
                   return;
                 }
                 Navigator.pop(
@@ -801,9 +838,9 @@ class _GatewayScreenState extends State<GatewayScreen> {
           const Divider(color: AppColors.divider, height: 1),
           const SizedBox(height: 12),
 
-          // ---- «Мёртвая зона» (гистерезис открытия) ----
+          // ---- Алгоритм определения открытия (BLE) ----
           const Text(
-            'ОПРЕДЕЛЕНИЕ ОТКРЫТИЯ (МЁРТВАЯ ЗОНА)',
+            'АЛГОРИТМ ОТКРЫТИЯ (BLE)',
             style: TextStyle(
               color: AppColors.onSurfaceMuted,
               fontSize: 11,
@@ -812,65 +849,178 @@ class _GatewayScreenState extends State<GatewayScreen> {
             ),
           ),
           const SizedBox(height: 6),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(
-                child: _textField(
-                  _rssiNearCtrl,
-                  'RSSI рядом',
-                  hint: 'P_close, напр. -60',
-                  numeric: true,
-                  allowNegative: true,
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: _textField(
-                  _rssiFarCtrl,
-                  'RSSI далеко',
-                  hint: 'P_dist, напр. -80',
-                  numeric: true,
-                  allowNegative: true,
-                ),
-              ),
-            ],
-          ),
+          _modeSelector(),
           const SizedBox(height: 12),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(
-                child: _textField(_tCloseCtrl, 't рядом, с',
-                    hint: 'держать', numeric: true),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: _textField(_tFarCtrl, 't далеко, с',
-                    hint: 'перевзвод', numeric: true),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: _textField(_cooldownCtrl, 'Звонок, с',
-                    hint: 'антидребезг', numeric: true),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          const Text(
-            'Открытие — когда метка подошла ближе «RSSI рядом» на «t рядом». '
-            'Повторно — только после отдаления за «RSSI далеко» на «t далеко» '
-            'или пропадания из зоны.',
-            style: TextStyle(
-              color: AppColors.onSurfaceMuted,
-              fontSize: 11,
-              height: 1.4,
-            ),
-          ),
+          if (_decisionMode == 'trajectory')
+            ..._trajectoryFields()
+          else
+            ..._deadZoneFields(),
+          const SizedBox(height: 12),
+          _textField(_cooldownCtrl, 'Антидребезг звонка, с',
+              hint: 'Мин. интервал между открытиями по входящему звонку.',
+              icon: Icons.call_outlined,
+              numeric: true),
         ],
       ),
     );
   }
+
+  /// Переключатель алгоритма: «Мёртвая зона» ↔ «Траектория».
+  Widget _modeSelector() {
+    Widget tab(String mode, String label, IconData icon) {
+      final selected = _decisionMode == mode;
+      return Expanded(
+        child: GestureDetector(
+          onTap: _running ? null : () => setState(() => _decisionMode = mode),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 180),
+            margin: const EdgeInsets.all(4),
+            padding: const EdgeInsets.symmetric(vertical: 10),
+            decoration: BoxDecoration(
+              gradient: selected ? primaryGradient : null,
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(icon,
+                    color: selected ? Colors.white : AppColors.onSurfaceMuted,
+                    size: 18),
+                const SizedBox(height: 2),
+                Text(label,
+                    style: TextStyle(
+                      color:
+                          selected ? Colors.white : AppColors.onSurfaceMuted,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 12,
+                    )),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Container(
+      decoration: BoxDecoration(
+        color: AppColors.surfaceDim,
+        borderRadius: BorderRadius.circular(14),
+      ),
+      padding: const EdgeInsets.all(2),
+      child: Row(
+        children: [
+          tab('deadZone', 'Мёртвая зона', Icons.adjust),
+          tab('trajectory', 'Траектория', Icons.timeline),
+        ],
+      ),
+    );
+  }
+
+  /// Поля алгоритма «мёртвой зоны» (гистерезис по двум порогам RSSI).
+  List<Widget> _deadZoneFields() => [
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: _textField(
+                _rssiNearCtrl,
+                'RSSI рядом',
+                hint: 'P_close, напр. -60',
+                numeric: true,
+                allowNegative: true,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: _textField(
+                _rssiFarCtrl,
+                'RSSI далеко',
+                hint: 'P_dist, напр. -80',
+                numeric: true,
+                allowNegative: true,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: _textField(_tCloseCtrl, 't рядом, с',
+                  hint: 'держать', numeric: true),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: _textField(_tFarCtrl, 't далеко, с',
+                  hint: 'перевзвод', numeric: true),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        const Text(
+          'Открытие — когда метка подошла ближе «RSSI рядом» на «t рядом». '
+          'Повторно — только после отдаления за «RSSI далеко» на «t далеко» '
+          'или пропадания из зоны.',
+          style: TextStyle(
+            color: AppColors.onSurfaceMuted,
+            fontSize: 11,
+            height: 1.4,
+          ),
+        ),
+      ];
+
+  /// Поля алгоритма «траектория» (Калман → лог-дистанция → тренд → КА).
+  List<Widget> _trajectoryFields() => [
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: _textField(_grantDistCtrl, 'Зона доступа, м',
+                  hint: 'радиус', numeric: true, decimal: true),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: _textField(_approachCtrl, 'Проб подряд',
+                  hint: 'приближается', numeric: true),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: _textField(_trendEpsCtrl, 'Порог тренда',
+                  hint: 'dBm/с', numeric: true, decimal: true),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: _textField(_txPowerCtrl, 'RSSI на 1 м',
+                  hint: 'калибровка',
+                  numeric: true,
+                  decimal: true,
+                  allowNegative: true),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: _textField(_pathLossCtrl, 'Затухание n',
+                  hint: 'среда 2..4', numeric: true, decimal: true),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        const Text(
+          'RSSI сглаживается фильтром Калмана и переводится в дистанцию по '
+          'лог-дистанционной модели. Доступ выдаётся при устойчивом приближении '
+          '(тренд по МНК) и входе в «зону доступа». Ядро методики ВКР.',
+          style: TextStyle(
+            color: AppColors.onSurfaceMuted,
+            fontSize: 11,
+            height: 1.4,
+          ),
+        ),
+      ];
 
   Widget _transportSelector() {
     Widget tab(GatewayTransport t, String label, IconData icon) {
@@ -1130,6 +1280,176 @@ class _GatewayScreenState extends State<GatewayScreen> {
     }
   }
 
+  /// Встроенный скан: ищет метки рядом и открывает диалог добавления с
+  /// предзаполненными полями (STOWN ID / iBeacon / MAC) — без вкладки «Сканер».
+  Future<void> _scanAddVehicle() async {
+    if (_running) return;
+    if (!await _ensurePermissions()) {
+      _snack('Нужны разрешения Bluetooth');
+      return;
+    }
+
+    final results = <ScanResult>[];
+    StreamSubscription<List<ScanResult>>? sub;
+    try {
+      await Hm10Sender.instance.startScan(timeout: const Duration(seconds: 12));
+    } catch (e) {
+      _snack('Скан: $e');
+      return;
+    }
+    if (!mounted) {
+      await Hm10Sender.instance.stopScan();
+      return;
+    }
+
+    final picked = await showModalBottomSheet<ScanResult>(
+      context: context,
+      backgroundColor: AppColors.surface,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheet) {
+          sub ??= Hm10Sender.instance.scanResults.listen((rs) {
+            results
+              ..clear()
+              ..addAll(rs);
+            // Сначала STOWN-метки, затем по убыванию RSSI.
+            results.sort((a, b) {
+              final ai = stownIdFromAdv(a.advertisementData) != null ? 0 : 1;
+              final bi = stownIdFromAdv(b.advertisementData) != null ? 0 : 1;
+              if (ai != bi) return ai - bi;
+              return b.rssi.compareTo(a.rssi);
+            });
+            setSheet(() {});
+          });
+          return SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    children: [
+                      const Expanded(
+                        child: Text('Метки и устройства рядом',
+                            style: TextStyle(
+                                color: AppColors.onSurface,
+                                fontSize: 16,
+                                fontWeight: FontWeight.w700)),
+                      ),
+                      const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  if (results.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 16),
+                      child: Text('Поиск устройств рядом…',
+                          style: TextStyle(color: AppColors.onSurfaceMuted)),
+                    )
+                  else
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 360),
+                      child: ListView(
+                        shrinkWrap: true,
+                        children: results.map((r) {
+                          final stownId =
+                              stownIdFromAdv(r.advertisementData);
+                          final isTag = stownId != null;
+                          final advName = r.advertisementData.advName;
+                          final title = advName.isEmpty
+                              ? (isTag ? 'Метка' : '(без имени)')
+                              : advName;
+                          final subtitle = isTag
+                              ? 'ID $stownId'
+                              : r.device.remoteId.str;
+                          return ListTile(
+                            leading: Icon(
+                              isTag ? Icons.sensors : Icons.bluetooth,
+                              color: isTag
+                                  ? AppColors.primary
+                                  : AppColors.onSurfaceMuted,
+                            ),
+                            title: Text(title,
+                                style: TextStyle(
+                                  color: AppColors.onSurface,
+                                  fontWeight: isTag
+                                      ? FontWeight.w700
+                                      : FontWeight.w500,
+                                )),
+                            subtitle: Text(subtitle,
+                                style: const TextStyle(
+                                    color: AppColors.onSurfaceMuted,
+                                    fontFamily: 'monospace',
+                                    fontSize: 12)),
+                            trailing: Text('${r.rssi}',
+                                style: const TextStyle(
+                                    color: AppColors.onSurfaceMuted,
+                                    fontSize: 12)),
+                            onTap: () => Navigator.pop(ctx, r),
+                          );
+                        }).toList(),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+
+    await sub?.cancel();
+    await Hm10Sender.instance.stopScan();
+    if (picked == null || !mounted) return;
+    await _editVehicleDialog(null, _templateFromScan(picked));
+  }
+
+  /// Строит шаблон ТС из результата скана: STOWN ID, либо iBeacon (UUID/Major/
+  /// Minor), либо MAC. Имя — из advName, иначе из MAC.
+  AuthorizedVehicle _templateFromScan(ScanResult r) {
+    final adv = r.advertisementData;
+    final mac = r.device.remoteId.str;
+    final advName = adv.advName.trim();
+
+    final stownId = stownIdFromAdv(adv);
+
+    String? uuid;
+    int? major;
+    int? minor;
+    final apple = adv.manufacturerData[0x004C];
+    if (apple != null &&
+        apple.length >= 23 &&
+        apple[0] == 0x02 &&
+        apple[1] == 0x15) {
+      uuid = apple
+          .sublist(2, 18)
+          .map((b) => b.toRadixString(16).padLeft(2, '0'))
+          .join()
+          .toUpperCase();
+      major = (apple[18] << 8) | apple[19];
+      minor = (apple[20] << 8) | apple[21];
+    }
+
+    final fallbackName = mac.length >= 5 ? 'Метка ${mac.substring(0, 5)}' : 'Метка';
+    return AuthorizedVehicle(
+      name: advName.isNotEmpty ? advName : fallbackName,
+      uuid: uuid,
+      // Для STOWN-метки и iBeacon MAC не сохраняем (рандомизируется на Android).
+      macAddress: (stownId == null && uuid == null) ? mac : null,
+      major: major,
+      minor: minor,
+      stownId: stownId,
+    );
+  }
+
   Widget _lockField() => _textField(
         _lockCtrl,
         'Номер замка (hex)',
@@ -1182,9 +1502,15 @@ class _GatewayScreenState extends State<GatewayScreen> {
                 onPressed: _reloadWhitelist,
               ),
               IconButton(
+                icon: const Icon(Icons.bluetooth_searching,
+                    color: AppColors.primary),
+                tooltip: 'Найти метку рядом',
+                onPressed: _running ? null : _scanAddVehicle,
+              ),
+              IconButton(
                 icon: const Icon(Icons.add_circle_outline,
                     color: AppColors.primary),
-                tooltip: 'Добавить',
+                tooltip: 'Добавить вручную',
                 onPressed: _running ? null : () => _editVehicleDialog(),
               ),
             ],
@@ -1355,7 +1681,11 @@ class _GatewayScreenState extends State<GatewayScreen> {
     IconData? icon,
     bool numeric = false,
     bool allowNegative = false,
+    bool decimal = false,
   }) {
+    final numRe = decimal
+        ? (allowNegative ? RegExp(r'^-?\d*\.?\d*') : RegExp(r'^\d*\.?\d*'))
+        : (allowNegative ? RegExp(r'^-?\d*') : RegExp(r'^\d*'));
     return TextField(
       controller: c,
       enabled: !_running,
@@ -1365,14 +1695,11 @@ class _GatewayScreenState extends State<GatewayScreen> {
         fontSize: 13,
       ),
       keyboardType: numeric
-          ? TextInputType.numberWithOptions(signed: allowNegative)
+          ? TextInputType.numberWithOptions(
+              signed: allowNegative, decimal: decimal)
           : TextInputType.text,
       inputFormatters: numeric
-          ? [
-              FilteringTextInputFormatter.allow(
-                allowNegative ? RegExp(r'^-?\d*') : RegExp(r'^\d*'),
-              ),
-            ]
+          ? [FilteringTextInputFormatter.allow(numRe)]
           : null,
       onChanged: (_) {
         if (c == _haUrlCtrl || c == _webhookCtrl) {

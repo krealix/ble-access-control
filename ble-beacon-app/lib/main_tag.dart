@@ -19,7 +19,7 @@ class StownTagApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'STOWN Метка',
+      title: 'BLE-Метка',
       debugShowCheckedModeBanner: false,
       theme: buildAppTheme(),
       home: const StownScreen(standalone: true),

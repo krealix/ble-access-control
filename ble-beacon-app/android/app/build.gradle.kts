@@ -46,12 +46,12 @@ android {
     productFlavors {
         create("full") {
             dimension = "app"
-            manifestPlaceholders["appName"] = "STOWN BLE"
+            manifestPlaceholders["appName"] = "BLE-Доступ"
         }
         create("tag") {
             dimension = "app"
             applicationIdSuffix = ".tag"
-            manifestPlaceholders["appName"] = "STOWN Метка"
+            manifestPlaceholders["appName"] = "BLE-Метка"
         }
     }
 }

@@ -208,11 +208,19 @@ class GatewayConfig {
     required this.whitelist,
     // Антидребезг для доступа по звонку (BLE использует КА «мёртвой зоны»).
     this.cooldownSeconds = 10,
+    // Алгоритм решения для BLE: 'deadZone' (гистерезис) | 'trajectory' (Калман).
+    this.decisionMode = 'deadZone',
     // Параметры «мёртвой зоны» (гистерезис) для BLE-открытия:
     this.rssiNear = -60, // P_close: RSSI ≥ этого = «рядом»
     this.rssiFar = -80, // P_dist: RSSI ≤ этого = «далеко»
     this.tCloseMs = 1000, // t_close: держаться «рядом» до открытия
     this.tFarMs = 3000, // t_dist: «далеко»/нет в зоне до перевзвода
+    // Параметры режима «траектория» (Калман + дистанция + тренд):
+    this.grantDistance = 2.0, // радиус зоны доступа, м
+    this.approachSamples = 4, // сколько подряд «приближается» до доступа
+    this.trendEps = 0.2, // порог наклона RSSI, dBm/с
+    this.txPower1m = -59.0, // калиброванный RSSI на 1 м
+    this.pathLossN = 2.5, // показатель затухания среды
     this.transport = GatewayTransport.http,
     // HTTP
     this.haUrl = 'http://192.168.0.10:8123',
@@ -230,11 +238,21 @@ class GatewayConfig {
   final List<AuthorizedVehicle> whitelist;
   final int cooldownSeconds;
 
+  /// Алгоритм решения: 'deadZone' | 'trajectory'.
+  final String decisionMode;
+
   // «Мёртвая зона» (гистерезис) для BLE-открытия
   final int rssiNear; // P_close
   final int rssiFar; // P_dist
   final int tCloseMs; // t_close
   final int tFarMs; // t_dist
+
+  // «Траектория» (Калман + дистанция + тренд)
+  final double grantDistance;
+  final int approachSamples;
+  final double trendEps;
+  final double txPower1m;
+  final double pathLossN;
 
   // Транспорт
   final GatewayTransport transport;
@@ -260,10 +278,16 @@ class GatewayConfig {
 
   Map<String, dynamic> toJson() => {
         'cooldownSeconds': cooldownSeconds,
+        'decisionMode': decisionMode,
         'rssiNear': rssiNear,
         'rssiFar': rssiFar,
         'tCloseMs': tCloseMs,
         'tFarMs': tFarMs,
+        'grantDistance': grantDistance,
+        'approachSamples': approachSamples,
+        'trendEps': trendEps,
+        'txPower1m': txPower1m,
+        'pathLossN': pathLossN,
         'whitelist': whitelist.map((v) => v.toJson()).toList(),
         'transport': transport.name,
         'haUrl': haUrl,
@@ -306,10 +330,16 @@ class GatewayConfig {
     return GatewayConfig(
       whitelist: whitelist,
       cooldownSeconds: j['cooldownSeconds'] as int? ?? 10,
+      decisionMode: j['decisionMode'] as String? ?? 'deadZone',
       rssiNear: j['rssiNear'] as int? ?? -60,
       rssiFar: j['rssiFar'] as int? ?? -80,
       tCloseMs: j['tCloseMs'] as int? ?? 1000,
       tFarMs: j['tFarMs'] as int? ?? 3000,
+      grantDistance: (j['grantDistance'] as num?)?.toDouble() ?? 2.0,
+      approachSamples: j['approachSamples'] as int? ?? 4,
+      trendEps: (j['trendEps'] as num?)?.toDouble() ?? 0.2,
+      txPower1m: (j['txPower1m'] as num?)?.toDouble() ?? -59.0,
+      pathLossN: (j['pathLossN'] as num?)?.toDouble() ?? 2.5,
       transport: transport,
       haUrl: j['haUrl'] as String? ?? 'http://192.168.0.10:8123',
       webhookId: j['webhookId'] as String? ?? 'gate_open',
@@ -325,10 +355,16 @@ class GatewayConfig {
   GatewayConfig copyWith({
     List<AuthorizedVehicle>? whitelist,
     int? cooldownSeconds,
+    String? decisionMode,
     int? rssiNear,
     int? rssiFar,
     int? tCloseMs,
     int? tFarMs,
+    double? grantDistance,
+    int? approachSamples,
+    double? trendEps,
+    double? txPower1m,
+    double? pathLossN,
     GatewayTransport? transport,
     String? haUrl,
     String? webhookId,
@@ -340,10 +376,16 @@ class GatewayConfig {
       GatewayConfig(
         whitelist: whitelist ?? this.whitelist,
         cooldownSeconds: cooldownSeconds ?? this.cooldownSeconds,
+        decisionMode: decisionMode ?? this.decisionMode,
         rssiNear: rssiNear ?? this.rssiNear,
         rssiFar: rssiFar ?? this.rssiFar,
         tCloseMs: tCloseMs ?? this.tCloseMs,
         tFarMs: tFarMs ?? this.tFarMs,
+        grantDistance: grantDistance ?? this.grantDistance,
+        approachSamples: approachSamples ?? this.approachSamples,
+        trendEps: trendEps ?? this.trendEps,
+        txPower1m: txPower1m ?? this.txPower1m,
+        pathLossN: pathLossN ?? this.pathLossN,
         transport: transport ?? this.transport,
         haUrl: haUrl ?? this.haUrl,
         webhookId: webhookId ?? this.webhookId,

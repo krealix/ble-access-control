@@ -191,7 +191,7 @@ class _ScannerScreenState extends State<ScannerScreen> {
                   _filterChip('iBeacon', BeaconKind.iBeacon),
                   _filterChip('Eddy UID', BeaconKind.eddystoneUid),
                   _filterChip('Eddy URL', BeaconKind.eddystoneUrl),
-                  _filterChip('STOWN', BeaconKind.stown),
+                  _filterChip('Метка', BeaconKind.stown),
                   _filterChip('Custom', BeaconKind.custom),
                   _filterChip('Generic', BeaconKind.generic),
                 ],
