@@ -29,6 +29,9 @@ class _ScannerScreenState extends State<ScannerScreen> {
   // Логирование наблюдений (время/метка/расстояние) в отдельный файл.
   bool _logging = false;
 
+  // Выбранные для логирования метки (по deviceId). Пусто = логировать все.
+  final Set<String> _logTargets = {};
+
   // Watchdog: перезапуск скана при остановке/застое (см. #6 — зависание).
   Timer? _watchdog;
   DateTime _lastResult = DateTime.now();
@@ -91,7 +94,9 @@ class _ScannerScreenState extends State<ScannerScreen> {
       for (final r in results) {
         final parsed = parseAdvertisement(r);
         _beacons[parsed.deviceId] = parsed;
-        if (_logging) {
+        // Логируем, если запись включена и метка выбрана (или выбор пуст = все).
+        if (_logging &&
+            (_logTargets.isEmpty || _logTargets.contains(parsed.deviceId))) {
           unawaited(ScannerLogger.instance.record(
             id: parsed.deviceId,
             name: parsed.name ?? parsed.kind.label,
@@ -173,6 +178,17 @@ class _ScannerScreenState extends State<ScannerScreen> {
     _showSnack('Лог сканера очищен');
   }
 
+  /// Добавить/убрать метку из набора логируемых.
+  void _toggleLogTarget(ParsedBeacon b) {
+    setState(() {
+      if (_logTargets.contains(b.deviceId)) {
+        _logTargets.remove(b.deviceId);
+      } else {
+        _logTargets.add(b.deviceId);
+      }
+    });
+  }
+
   Color _kindColor(BeaconKind k) => switch (k) {
         BeaconKind.iBeacon => AppColors.primaryLight,
         BeaconKind.eddystoneUid => AppColors.success,
@@ -211,8 +227,15 @@ class _ScannerScreenState extends State<ScannerScreen> {
               _logging ? Icons.fiber_manual_record : Icons.fiber_manual_record_outlined,
               color: _logging ? AppColors.danger : AppColors.onSurfaceMuted,
             ),
-            tooltip: _logging ? 'Логирование вкл.' : 'Логирование выкл.',
-            onPressed: () => setState(() => _logging = !_logging),
+            tooltip: _logging ? 'Запись вкл.' : 'Запись выкл.',
+            onPressed: () {
+              setState(() => _logging = !_logging);
+              if (_logging) {
+                _showSnack(_logTargets.isEmpty
+                    ? 'Запись всех меток'
+                    : 'Запись выбранных меток: ${_logTargets.length}');
+              }
+            },
           ),
           PopupMenuButton<String>(
             icon: const Icon(Icons.more_vert, color: AppColors.primary),
@@ -220,10 +243,18 @@ class _ScannerScreenState extends State<ScannerScreen> {
             onSelected: (v) {
               if (v == 'export') _exportLog();
               if (v == 'clear') _clearLog();
+              if (v == 'unselect') {
+                setState(_logTargets.clear);
+                _showSnack('Выбор меток сброшен');
+              }
             },
-            itemBuilder: (_) => const [
-              PopupMenuItem(value: 'export', child: Text('Экспорт лога (CSV)')),
-              PopupMenuItem(value: 'clear', child: Text('Очистить лог')),
+            itemBuilder: (_) => [
+              const PopupMenuItem(
+                  value: 'export', child: Text('Экспорт лога (CSV)')),
+              const PopupMenuItem(value: 'clear', child: Text('Очистить лог')),
+              if (_logTargets.isNotEmpty)
+                const PopupMenuItem(
+                    value: 'unselect', child: Text('Сбросить выбор меток')),
             ],
           ),
           IconButton(
@@ -258,11 +289,17 @@ class _ScannerScreenState extends State<ScannerScreen> {
               children: [
                 const Text('Сканер'),
                 Text(
-                  _scanning
-                      ? 'Поиск... найдено ${_beacons.length}'
-                      : 'Остановлен',
-                  style: const TextStyle(
-                    color: AppColors.onSurfaceMuted,
+                  _logging
+                      ? (_logTargets.isEmpty
+                          ? '● Запись всех · найдено ${_beacons.length}'
+                          : '● Запись ${_logTargets.length} меток')
+                      : (_scanning
+                          ? 'Поиск... найдено ${_beacons.length}'
+                          : 'Остановлен'),
+                  style: TextStyle(
+                    color: _logging
+                        ? AppColors.danger
+                        : AppColors.onSurfaceMuted,
                     fontSize: 13,
                     fontWeight: FontWeight.w400,
                   ),
@@ -425,7 +462,23 @@ class _ScannerScreenState extends State<ScannerScreen> {
               ],
             ),
           ),
-          const SizedBox(width: 8),
+          const SizedBox(width: 4),
+          // Выбор метки для логирования.
+          IconButton(
+            visualDensity: VisualDensity.compact,
+            icon: Icon(
+              _logTargets.contains(b.deviceId)
+                  ? Icons.playlist_add_check_circle
+                  : Icons.playlist_add_circle_outlined,
+              color: _logTargets.contains(b.deviceId)
+                  ? AppColors.primary
+                  : AppColors.onSurfaceMuted,
+            ),
+            tooltip: _logTargets.contains(b.deviceId)
+                ? 'Логируется'
+                : 'Логировать эту метку',
+            onPressed: () => _toggleLogTarget(b),
+          ),
           Column(
             children: [
               Icon(_rssiIcon(b.rssi), color: _rssiColor(b.rssi), size: 22),
@@ -453,7 +506,8 @@ class _ScannerScreenState extends State<ScannerScreen> {
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
-      builder: (_) => SafeArea(
+      builder: (_) => StatefulBuilder(
+        builder: (ctx, setSheet) => SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(20),
           child: Column(
@@ -549,7 +603,25 @@ class _ScannerScreenState extends State<ScannerScreen> {
                   ),
                 ),
               ),
-              const SizedBox(height: 16),
+              const SizedBox(height: 8),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                value: _logTargets.contains(b.deviceId),
+                onChanged: (_) {
+                  _toggleLogTarget(b);
+                  setSheet(() {});
+                },
+                title: const Text('Логировать эту метку',
+                    style: TextStyle(color: AppColors.onSurface, fontSize: 14)),
+                subtitle: const Text(
+                  'Запись только выбранных меток. Включите запись кнопкой ● в шапке.',
+                  style:
+                      TextStyle(color: AppColors.onSurfaceMuted, fontSize: 11),
+                ),
+                activeThumbColor: AppColors.primary,
+              ),
+              const SizedBox(height: 8),
               FilledButton.icon(
                 onPressed: () {
                   Navigator.of(context).maybePop();
@@ -562,6 +634,7 @@ class _ScannerScreenState extends State<ScannerScreen> {
             ],
           ),
         ),
+      ),
       ),
     );
   }
