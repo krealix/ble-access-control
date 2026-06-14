@@ -64,6 +64,15 @@ class _GatewayScreenState extends State<GatewayScreen> {
   // Общий для TCP/HM-10: номер замка (hex)
   final _lockCtrl = TextEditingController();
 
+  // Командные байты (hex) и нулевой идентификатор в 1-м пакете
+  final _cmd1Ctrl = TextEditingController();
+  final _cmd2Ctrl = TextEditingController();
+  bool _firstZeroId = true;
+
+  // Доступ по звонку
+  bool _callAccessEnabled = true;
+  bool _callHangup = true;
+
   // Selected transport (mirror of config.transport for UI state)
   GatewayTransport _transport = GatewayTransport.http;
 
@@ -100,6 +109,8 @@ class _GatewayScreenState extends State<GatewayScreen> {
     _trendEpsCtrl.dispose();
     _txPowerCtrl.dispose();
     _pathLossCtrl.dispose();
+    _cmd1Ctrl.dispose();
+    _cmd2Ctrl.dispose();
     super.dispose();
   }
 
@@ -122,6 +133,11 @@ class _GatewayScreenState extends State<GatewayScreen> {
       _tcpPortCtrl.text = cfg.tcpPort.toString();
       _hm10Ctrl.text = cfg.hm10Device;
       _lockCtrl.text = cfg.lockHex;
+      _cmd1Ctrl.text = cfg.cmd1Hex;
+      _cmd2Ctrl.text = cfg.cmd2Hex;
+      _firstZeroId = cfg.firstZeroId;
+      _callAccessEnabled = cfg.callAccessEnabled;
+      _callHangup = cfg.callHangup;
       _grantDistCtrl.text = _fmtNum(cfg.grantDistance);
       _approachCtrl.text = cfg.approachSamples.toString();
       _trendEpsCtrl.text = _fmtNum(cfg.trendEps);
@@ -150,6 +166,11 @@ class _GatewayScreenState extends State<GatewayScreen> {
         tcpPort: int.tryParse(_tcpPortCtrl.text.trim()) ?? 9999,
         hm10Device: _hm10Ctrl.text.trim(),
         lockHex: _lockCtrl.text.trim().isEmpty ? '7702' : _lockCtrl.text.trim(),
+        cmd1Hex: _cmd1Ctrl.text.trim().isEmpty ? '01' : _cmd1Ctrl.text.trim(),
+        cmd2Hex: _cmd2Ctrl.text.trim().isEmpty ? '87' : _cmd2Ctrl.text.trim(),
+        firstZeroId: _firstZeroId,
+        callAccessEnabled: _callAccessEnabled,
+        callHangup: _callHangup,
       );
 
   /// Форматирует число без лишнего «.0» (для префилла полей).
@@ -860,6 +881,53 @@ class _GatewayScreenState extends State<GatewayScreen> {
               hint: 'Мин. интервал между открытиями по входящему звонку.',
               icon: Icons.call_outlined,
               numeric: true),
+
+          const SizedBox(height: 8),
+          const Divider(color: AppColors.divider, height: 1),
+          const SizedBox(height: 12),
+
+          // ---- Доступ по звонку ----
+          const Text(
+            'ДОСТУП ПО ЗВОНКУ',
+            style: TextStyle(
+              color: AppColors.onSurfaceMuted,
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 1.0,
+            ),
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            value: _callAccessEnabled,
+            onChanged:
+                _running ? null : (v) => setState(() => _callAccessEnabled = v),
+            title: const Text('Открывать по входящему звонку',
+                style: TextStyle(color: AppColors.onSurface, fontSize: 14)),
+            subtitle: const Text(
+              'Работает параллельно с BLE. Звонок из базы → номер в BCD кладётся '
+              'в пакет → открытие через выбранный транспорт. Нужна запись с '
+              'телефоном в авторизованных ТС.',
+              style: TextStyle(color: AppColors.onSurfaceMuted, fontSize: 11),
+            ),
+            activeThumbColor: AppColors.primary,
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            value: _callHangup,
+            onChanged: (_running || !_callAccessEnabled)
+                ? null
+                : (v) => setState(() => _callHangup = v),
+            title: const Text('Сбрасывать звонок автоматически',
+                style: TextStyle(color: AppColors.onSurface, fontSize: 14)),
+            subtitle: const Text(
+              'После чтения номера шлюз сам отклоняет вызов. Требует разрешение '
+              '«Управление вызовами» (Android 9+).',
+              style: TextStyle(color: AppColors.onSurfaceMuted, fontSize: 11),
+            ),
+            activeThumbColor: AppColors.primary,
+          ),
         ],
       ),
     );
@@ -1122,6 +1190,8 @@ class _GatewayScreenState extends State<GatewayScreen> {
           ]),
           const SizedBox(height: 12),
           _lockField(),
+          const SizedBox(height: 12),
+          ..._commandBytesFields(),
           const SizedBox(height: 8),
           _commandsHint(),
         ];
@@ -1148,11 +1218,48 @@ class _GatewayScreenState extends State<GatewayScreen> {
           ),
           const SizedBox(height: 12),
           _lockField(),
+          const SizedBox(height: 12),
+          ..._commandBytesFields(),
           const SizedBox(height: 8),
           _commandsHint(),
         ];
     }
   }
+
+  /// Поля настраиваемых командных байтов + переключатель нулевого id в 1-м пакете.
+  List<Widget> _commandBytesFields() => [
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: _textField(_cmd1Ctrl, '1-й байт (hex)',
+                  hint: 'напр. 01', icon: Icons.looks_one_outlined),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: _textField(_cmd2Ctrl, '2-й байт (hex)',
+                  hint: 'напр. 87', icon: Icons.looks_two_outlined),
+            ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          dense: true,
+          value: _firstZeroId,
+          onChanged: _running
+              ? null
+              : (v) => setState(() => _firstZeroId = v),
+          title: const Text('Нули в 1-м пакете',
+              style: TextStyle(color: AppColors.onSurface, fontSize: 14)),
+          subtitle: const Text(
+            'Идентификатор (байты 2-8) первого пакета — нули. Реальный '
+            'идентификатор уходит во втором пакете.',
+            style: TextStyle(color: AppColors.onSurfaceMuted, fontSize: 11),
+          ),
+          activeThumbColor: AppColors.primary,
+        ),
+      ];
 
   /// Сканирует эфир и даёт выбрать HM-10 из списка (как в «Сканере») —
   /// без ручного ввода MAC. Подставляет remoteId в поле адреса.
@@ -1458,8 +1565,9 @@ class _GatewayScreenState extends State<GatewayScreen> {
       );
 
   Widget _commandsHint() => const Text(
-        'Открытие отправляет две команды: сначала пакет с 0x01, через 500 мс — '
-        'с 0x87. Идентификатор берётся из STOWN-метки (иначе нули).',
+        'Открытие отправляет две команды: сначала пакет с 1-м байтом, через '
+        '500 мс — со 2-м. Идентификатор берётся из метки (или номера звонящего '
+        'в BCD), иначе нули.',
         style: TextStyle(
           color: AppColors.onSurfaceMuted,
           fontSize: 11,

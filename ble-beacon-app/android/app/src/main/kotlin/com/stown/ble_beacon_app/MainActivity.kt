@@ -7,6 +7,9 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
+import android.os.Build
+import android.telecom.TelecomManager
 import android.telephony.TelephonyManager
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -110,6 +113,28 @@ class MainActivity : FlutterActivity() {
                             result.error("PERM_ERROR", e.message, null)
                         }
                     }
+                    "requestHangupPermission" -> {
+                        try {
+                            if (android.os.Build.VERSION.SDK_INT >=
+                                    android.os.Build.VERSION_CODES.O) {
+                                ActivityCompat.requestPermissions(
+                                    this,
+                                    arrayOf(Manifest.permission.ANSWER_PHONE_CALLS),
+                                    7002,
+                                )
+                            }
+                            result.success(true)
+                        } catch (e: Throwable) {
+                            result.error("PERM_ERROR", e.message, null)
+                        }
+                    }
+                    "endCall" -> {
+                        try {
+                            result.success(endCurrentCall())
+                        } catch (e: Throwable) {
+                            result.error("END_CALL_ERROR", e.message, null)
+                        }
+                    }
                     else -> result.notImplemented()
                 }
             }
@@ -160,6 +185,27 @@ class MainActivity : FlutterActivity() {
         }
         callReceiver = null
         super.onDestroy()
+    }
+
+    /// Сбрасывает текущий звонок через TelecomManager.endCall() (API 28+,
+    /// нужно разрешение ANSWER_PHONE_CALLS). Возвращает true при успехе.
+    private fun endCurrentCall(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return false
+        if (ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.ANSWER_PHONE_CALLS,
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            return false
+        }
+        val tm = getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
+            ?: return false
+        return try {
+            @Suppress("MissingPermission")
+            tm.endCall()
+        } catch (e: Throwable) {
+            false
+        }
     }
 
     private fun btAdapter(): BluetoothAdapter? {

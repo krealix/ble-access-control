@@ -70,14 +70,19 @@ class GatewayMonitor {
       _absenceTimer = Timer.periodic(
           const Duration(seconds: 1), (_) => _checkAbsence());
 
-      // Доступ по звонку (Вариант А): слушаем входящие вызовы, только если
-      // в белом списке есть запись-телефон (ключ PHONE:...).
+      // Доступ по звонку (Вариант А): слушаем входящие вызовы, если включён
+      // доступ по звонку и в белом списке есть запись-телефон (ключ PHONE:...).
       final hasPhone = config.whitelist
           .any((v) => (v.matchKey ?? '').toUpperCase().startsWith('PHONE:'));
-      if (hasPhone) {
+      if (config.callAccessEnabled && hasPhone) {
         await IncomingCall.requestPermissions();
+        if (config.callHangup) await IncomingCall.requestHangupPermission();
         _callSub = IncomingCall.instance.numbers.listen(_onIncomingCall);
-        _emit(EventLevel.info, 'Доступ по звонку включён');
+        _emit(
+            EventLevel.info,
+            config.callHangup
+                ? 'Доступ по звонку включён (со сбросом)'
+                : 'Доступ по звонку включён');
       }
 
       // HM-10: заранее открываем постоянное подключение (если это транспорт),
@@ -316,35 +321,52 @@ class GatewayMonitor {
   }
 
   /// Открытие выбранным транспортом: HTTP шлёт JSON [info]; TCP/HM-10 — две
-  /// STOWN-команды (0x01, пауза 500 мс, 0x87) с id метки (или нулями) и замком.
+  /// команды (cmd1, пауза 500 мс, cmd2). Идентификатор (байты 2-8) во 2-м пакете
+  /// — это [idOverride] (напр. номер в BCD) или id метки; в 1-м пакете — нули,
+  /// если включён firstZeroId. Командные байты настраиваются (cmd1Hex/cmd2Hex).
   Future<void> _openFor({
     String? advStownId,
+    Uint8List? idOverride,
     required Map<String, dynamic> info,
   }) async {
-    final idBytes = _idBytes(advStownId);
+    final realId = idOverride ?? _idBytes(advStownId);
     final lock = _lockNumber();
-    final pkt01 =
-        StownPacket.build(command: 0x01, identifier: idBytes, lockNumber: lock);
-    final pkt87 =
-        StownPacket.build(command: 0x87, identifier: idBytes, lockNumber: lock);
+    final cmd1 = _cmdByte(config.cmd1Hex, 0x01);
+    final cmd2 = _cmdByte(config.cmd2Hex, 0x87);
+    final id1 = config.firstZeroId ? Uint8List(kIdLen) : realId;
+    final pkt1 =
+        StownPacket.build(command: cmd1, identifier: id1, lockNumber: lock);
+    final pkt2 =
+        StownPacket.build(command: cmd2, identifier: realId, lockNumber: lock);
 
     switch (config.transport) {
       case GatewayTransport.http:
         await _sendHttp(info);
         break;
       case GatewayTransport.tcp:
-        await _sendStownTcp(pkt01, pkt87);
+        await _sendStownTcp(pkt1, pkt2);
         break;
       case GatewayTransport.hm10:
-        await _sendStownHm10(pkt01, pkt87);
+        await _sendStownHm10(pkt1, pkt2);
         break;
     }
+  }
+
+  /// Командный байт из hex-настройки (0..255), иначе [fallback].
+  int _cmdByte(String hex, int fallback) {
+    final s = hex.trim().replaceAll('0x', '');
+    return (int.tryParse(s, radix: 16) ?? fallback) & 0xFF;
   }
 
   /// Входящий звонок (Вариант А): сверяем номер с белым списком по ключу
   /// PHONE:<последние 10 цифр>. RSSI/окно проб не применяются — это явное
   /// действие; только cooldown.
   void _onIncomingCall(String last10) {
+    // Шлюз-телефон выделенный: сбрасываем звонок сразу после чтения номера.
+    if (config.callHangup) {
+      unawaited(IncomingCall.endCall());
+    }
+
     final advKey = 'PHONE:$last10';
     AuthorizedVehicle? vehicle;
     for (final v in config.whitelist) {
@@ -366,9 +388,17 @@ class GatewayMonitor {
     }
     _lastTrigger[vehicle.name] = now;
 
+    // Идентификатор пакета (байты 2-8) — номер звонящего в BCD (7 байт, 14 цифр).
+    Uint8List? idBcd;
+    try {
+      idBcd = StownPacket.buildIdentifier(IdentifierMode.phone, last10);
+    } catch (_) {
+      idBcd = null;
+    }
+
     _emit(EventLevel.success, 'Открытие (звонок): ${vehicle.name} · …$last10');
     unawaited(GatewayLogger.instance.event('OPEN_CALL', vehicle.name));
-    _openFor(info: <String, dynamic>{
+    _openFor(idOverride: idBcd, info: <String, dynamic>{
       'vehicle': vehicle.name,
       'source': 'call',
       'phone': last10,
@@ -425,7 +455,8 @@ class GatewayMonitor {
   // TCP — две STOWN-команды: 0x01, пауза 500 мс, 0x87.
   // ------------------------------------------------------------------ //
 
-  Future<void> _sendStownTcp(Uint8List pkt01, Uint8List pkt87) async {
+  Future<void> _sendStownTcp(Uint8List pkt1, Uint8List pkt2) async {
+    final dst = '${config.tcpHost}:${config.tcpPort}';
     Socket? socket;
     try {
       socket = await Socket.connect(
@@ -433,15 +464,13 @@ class GatewayMonitor {
         config.tcpPort,
         timeout: const Duration(seconds: 5),
       );
-      socket.add(pkt01);
+      socket.add(pkt1);
       await socket.flush();
-      _emit(EventLevel.success,
-          'TCP: 0x01 → ${config.tcpHost}:${config.tcpPort}');
+      _emit(EventLevel.success, 'TCP: ${_hb(pkt1)} → $dst');
       await Future.delayed(const Duration(milliseconds: 500));
-      socket.add(pkt87);
+      socket.add(pkt2);
       await socket.flush();
-      _emit(EventLevel.success,
-          'TCP: 0x87 → ${config.tcpHost}:${config.tcpPort}');
+      _emit(EventLevel.success, 'TCP: ${_hb(pkt2)} → $dst');
     } on TimeoutException {
       _emit(EventLevel.error,
           'TCP: таймаут подключения к ${config.tcpHost}:${config.tcpPort}');
@@ -462,7 +491,7 @@ class GatewayMonitor {
   // сосуществует со сканированием (не нужно его останавливать).
   // ------------------------------------------------------------------ //
 
-  Future<void> _sendStownHm10(Uint8List pkt01, Uint8List pkt87) async {
+  Future<void> _sendStownHm10(Uint8List pkt1, Uint8List pkt2) async {
     // Android getRemoteDevice требует MAC в ВЕРХНЕМ регистре с двоеточиями.
     final id = config.hm10Device.trim().toUpperCase();
     if (id.isEmpty) {
@@ -476,14 +505,19 @@ class GatewayMonitor {
     }
     try {
       void log(String m) => _emit(EventLevel.info, 'HM-10: $m');
-      await Hm10Sender.instance.writePersistent(id, pkt01, onLog: log);
+      await Hm10Sender.instance.writePersistent(id, pkt1, onLog: log);
       await Future.delayed(const Duration(milliseconds: 500));
-      await Hm10Sender.instance.writePersistent(id, pkt87, onLog: log);
-      _emit(EventLevel.success, 'HM-10: 0x01 и 0x87 отправлены → $id');
+      await Hm10Sender.instance.writePersistent(id, pkt2, onLog: log);
+      _emit(EventLevel.success,
+          'HM-10: ${_hb(pkt1)} и ${_hb(pkt2)} отправлены → $id');
     } catch (e) {
       _emit(EventLevel.error, 'HM-10: $e');
     }
   }
+
+  /// Краткая запись команды пакета для лога: «0x87».
+  String _hb(Uint8List pkt) =>
+      '0x${pkt.isEmpty ? '00' : pkt.first.toRadixString(16).padLeft(2, '0')}';
 
   void _emit(EventLevel level, String message) {
     _events.add(GatewayEvent(

@@ -3,11 +3,13 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../models/beacon.dart';
 import '../models/gateway.dart';
 import '../services/beacon_parser.dart';
 import '../services/gateway_storage.dart';
+import '../services/scanner_logger.dart';
 import '../theme.dart';
 import '../widgets/common.dart';
 
@@ -21,15 +23,22 @@ class ScannerScreen extends StatefulWidget {
 class _ScannerScreenState extends State<ScannerScreen> {
   final Map<String, ParsedBeacon> _beacons = {};
   StreamSubscription<List<ScanResult>>? _resultsSub;
-  StreamSubscription<bool>? _stateSub;
-  bool _scanning = false;
+  bool _scanning = false; // активная сессия поиска (намерение пользователя)
   BeaconKind? _filter;
+
+  // Логирование наблюдений (время/метка/расстояние) в отдельный файл.
+  bool _logging = false;
+
+  // Watchdog: перезапуск скана при остановке/застое (см. #6 — зависание).
+  Timer? _watchdog;
+  DateTime _lastResult = DateTime.now();
 
   @override
   void dispose() {
     _resultsSub?.cancel();
-    _stateSub?.cancel();
+    _watchdog?.cancel();
     FlutterBluePlus.stopScan();
+    ScannerLogger.instance.flushClose();
     super.dispose();
   }
 
@@ -45,9 +54,13 @@ class _ScannerScreenState extends State<ScannerScreen> {
 
   Future<void> _toggle() async {
     if (_scanning) {
+      _scanning = false;
+      _watchdog?.cancel();
+      _watchdog = null;
       await FlutterBluePlus.stopScan();
       await _resultsSub?.cancel();
-      if (mounted) setState(() => _scanning = false);
+      _resultsSub = null;
+      if (mounted) setState(() {});
       return;
     }
 
@@ -71,21 +84,33 @@ class _ScannerScreenState extends State<ScannerScreen> {
       _scanning = true;
     });
 
+    _lastResult = DateTime.now();
     _resultsSub = FlutterBluePlus.scanResults.listen((results) {
       if (!mounted) return;
-      var changed = false;
+      _lastResult = DateTime.now();
       for (final r in results) {
         final parsed = parseAdvertisement(r);
         _beacons[parsed.deviceId] = parsed;
-        changed = true;
+        if (_logging) {
+          unawaited(ScannerLogger.instance.record(
+            id: parsed.deviceId,
+            name: parsed.name ?? parsed.kind.label,
+            rssi: parsed.rssi,
+          ));
+        }
       }
-      if (changed) setState(() {});
+      if (results.isNotEmpty) setState(() {});
     });
 
-    _stateSub = FlutterBluePlus.isScanning.listen((s) {
-      if (mounted) setState(() => _scanning = s);
-    });
+    await _startScan();
 
+    // Watchdog: каждые 3 с чистим устаревшие метки и перезапускаем скан,
+    // если система его молча остановила или он «завис» (нет обновлений).
+    _watchdog = Timer.periodic(
+        const Duration(seconds: 3), (_) => _watchdogTick());
+  }
+
+  Future<void> _startScan() async {
     try {
       await FlutterBluePlus.startScan(
         continuousUpdates: true,
@@ -96,9 +121,56 @@ class _ScannerScreenState extends State<ScannerScreen> {
     }
   }
 
+  Future<void> _watchdogTick() async {
+    if (!_scanning) return;
+    final now = DateTime.now();
+
+    // Чистим метки, не виденные дольше 20 с (страховка к removeIfGone).
+    final stale = _beacons.entries
+        .where((e) => now.difference(e.value.seenAt).inSeconds > 20)
+        .map((e) => e.key)
+        .toList();
+    if (stale.isNotEmpty) {
+      for (final k in stale) {
+        _beacons.remove(k);
+      }
+      if (mounted) setState(() {});
+    }
+
+    // Перезапуск, если скан реально не идёт или нет обновлений > 10 с.
+    final stalled = now.difference(_lastResult).inSeconds > 10;
+    if (!FlutterBluePlus.isScanningNow || stalled) {
+      try {
+        await FlutterBluePlus.stopScan();
+        await _startScan();
+        _lastResult = DateTime.now();
+      } catch (_) {}
+    }
+  }
+
   void _showSnack(String msg) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  /// Экспорт CSV-лога сканера (поделиться файлом).
+  Future<void> _exportLog() async {
+    try {
+      final size = await ScannerLogger.instance.sizeBytes();
+      if (size <= 40) {
+        _showSnack('Лог пуст — включите запись (кнопка ●)');
+        return;
+      }
+      final path = await ScannerLogger.instance.fileForExport();
+      await Share.shareXFiles([XFile(path)], subject: 'Лог сканера BLE');
+    } catch (e) {
+      _showSnack('Экспорт: $e');
+    }
+  }
+
+  Future<void> _clearLog() async {
+    await ScannerLogger.instance.clear();
+    _showSnack('Лог сканера очищен');
   }
 
   Color _kindColor(BeaconKind k) => switch (k) {
@@ -135,13 +207,35 @@ class _ScannerScreenState extends State<ScannerScreen> {
         toolbarHeight: 72,
         actions: [
           IconButton(
+            icon: Icon(
+              _logging ? Icons.fiber_manual_record : Icons.fiber_manual_record_outlined,
+              color: _logging ? AppColors.danger : AppColors.onSurfaceMuted,
+            ),
+            tooltip: _logging ? 'Логирование вкл.' : 'Логирование выкл.',
+            onPressed: () => setState(() => _logging = !_logging),
+          ),
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.more_vert, color: AppColors.primary),
+            tooltip: 'Лог сканера',
+            onSelected: (v) {
+              if (v == 'export') _exportLog();
+              if (v == 'clear') _clearLog();
+            },
+            itemBuilder: (_) => const [
+              PopupMenuItem(value: 'export', child: Text('Экспорт лога (CSV)')),
+              PopupMenuItem(value: 'clear', child: Text('Очистить лог')),
+            ],
+          ),
+          IconButton(
             icon: const Icon(Icons.logout, color: AppColors.primary),
             tooltip: 'Выйти',
             onPressed: () => performLogout(
               context,
               onBeforeLogout: () async {
+                _watchdog?.cancel();
                 await FlutterBluePlus.stopScan();
                 await _resultsSub?.cancel();
+                await ScannerLogger.instance.flushClose();
               },
             ),
           ),
@@ -414,6 +508,14 @@ class _ScannerScreenState extends State<ScannerScreen> {
                       fontWeight: FontWeight.w600,
                     ),
                   ),
+                  const SizedBox(width: 10),
+                  Text(
+                    '≈ ${ScannerLogger.distanceFromRssi(b.rssi).toStringAsFixed(1)} м',
+                    style: const TextStyle(
+                      color: AppColors.onSurfaceMuted,
+                      fontSize: 13,
+                    ),
+                  ),
                 ],
               ),
               const SizedBox(height: 16),
@@ -524,11 +626,25 @@ class _ScannerScreenState extends State<ScannerScreen> {
     }
     final comment =
         commentCtrl.text.trim().isEmpty ? key : commentCtrl.text.trim();
+
+    // Сохраняем реальные идентификаторы из рекламы, чтобы шлюз матчил сразу:
+    //   метка → ID (stownId); iBeacon → UUID/Major/Minor; иначе → MAC.
+    final vehicle = AuthorizedVehicle(
+      name: comment,
+      matchKey: key,
+      stownId: isStown ? normalizeId(b.fields['ID']) : null,
+      uuid: b.kind == BeaconKind.iBeacon ? b.fields['UUID'] : null,
+      major: b.kind == BeaconKind.iBeacon
+          ? int.tryParse(b.fields['Major'] ?? '')
+          : null,
+      minor: b.kind == BeaconKind.iBeacon
+          ? int.tryParse(b.fields['Minor'] ?? '')
+          : null,
+      macAddress:
+          (isStown || b.kind == BeaconKind.iBeacon) ? null : b.deviceId,
+    );
     final updated = cfg.copyWith(
-      whitelist: [
-        ...cfg.whitelist,
-        AuthorizedVehicle(name: comment, matchKey: key),
-      ],
+      whitelist: [...cfg.whitelist, vehicle],
     );
     await GatewayStorage.instance.save(updated);
     _showSnack('Добавлено в авторизованные: $comment');

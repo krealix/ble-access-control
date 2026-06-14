@@ -29,4 +29,18 @@ class IncomingCall {
       await _methods.invokeMethod('requestCallPermissions');
     } catch (_) {}
   }
+
+  /// Запрос разрешения ANSWER_PHONE_CALLS — нужно для сброса звонка.
+  static Future<void> requestHangupPermission() async {
+    try {
+      await _methods.invokeMethod('requestHangupPermission');
+    } catch (_) {}
+  }
+
+  /// Сбросить текущий входящий звонок (TelecomManager.endCall, Android 9+).
+  static Future<void> endCall() async {
+    try {
+      await _methods.invokeMethod('endCall');
+    } catch (_) {}
+  }
 }

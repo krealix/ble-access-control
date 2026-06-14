@@ -232,6 +232,15 @@ class GatewayConfig {
     this.hm10Device = '',
     // Общий для TCP и HM-10: номер замка (hex), напр. 7702
     this.lockHex = '7702',
+    // Командные байты пакета (hex). 1-й — «подготовка», 2-й — «открыть».
+    this.cmd1Hex = '01',
+    this.cmd2Hex = '87',
+    // В 1-м пакете идентификатор (байты 2-8) заполнять нулями.
+    this.firstZeroId = true,
+    // Доступ по звонку (Вариант А): открытие при входящем из базы.
+    this.callAccessEnabled = true,
+    // Автоматически сбрасывать входящий звонок после чтения номера.
+    this.callHangup = true,
   });
 
   // Общие
@@ -271,6 +280,15 @@ class GatewayConfig {
   // Номер замка (hex) для STOWN-команд TCP/HM-10
   final String lockHex;
 
+  // Командные байты (hex) и режим нулевого идентификатора в 1-м пакете
+  final String cmd1Hex;
+  final String cmd2Hex;
+  final bool firstZeroId;
+
+  // Доступ по звонку
+  final bool callAccessEnabled;
+  final bool callHangup;
+
   String get webhookUrl {
     final base = haUrl.replaceAll(RegExp(r'/+$'), '');
     return '$base/api/webhook/$webhookId';
@@ -296,6 +314,11 @@ class GatewayConfig {
         'tcpPort': tcpPort,
         'hm10Device': hm10Device,
         'lockHex': lockHex,
+        'cmd1Hex': cmd1Hex,
+        'cmd2Hex': cmd2Hex,
+        'firstZeroId': firstZeroId,
+        'callAccessEnabled': callAccessEnabled,
+        'callHangup': callHangup,
       };
 
   /// Загрузка с учётом старого формата (где был beaconUuid на уровне config).
@@ -347,6 +370,11 @@ class GatewayConfig {
       tcpPort: j['tcpPort'] as int? ?? 9999,
       hm10Device: j['hm10Device'] as String? ?? '',
       lockHex: j['lockHex'] as String? ?? '7702',
+      cmd1Hex: j['cmd1Hex'] as String? ?? '01',
+      cmd2Hex: j['cmd2Hex'] as String? ?? '87',
+      firstZeroId: j['firstZeroId'] as bool? ?? true,
+      callAccessEnabled: j['callAccessEnabled'] as bool? ?? true,
+      callHangup: j['callHangup'] as bool? ?? true,
     );
   }
 
@@ -372,6 +400,11 @@ class GatewayConfig {
     int? tcpPort,
     String? hm10Device,
     String? lockHex,
+    String? cmd1Hex,
+    String? cmd2Hex,
+    bool? firstZeroId,
+    bool? callAccessEnabled,
+    bool? callHangup,
   }) =>
       GatewayConfig(
         whitelist: whitelist ?? this.whitelist,
@@ -393,6 +426,11 @@ class GatewayConfig {
         tcpPort: tcpPort ?? this.tcpPort,
         hm10Device: hm10Device ?? this.hm10Device,
         lockHex: lockHex ?? this.lockHex,
+        cmd1Hex: cmd1Hex ?? this.cmd1Hex,
+        cmd2Hex: cmd2Hex ?? this.cmd2Hex,
+        firstZeroId: firstZeroId ?? this.firstZeroId,
+        callAccessEnabled: callAccessEnabled ?? this.callAccessEnabled,
+        callHangup: callHangup ?? this.callHangup,
       );
 }
 

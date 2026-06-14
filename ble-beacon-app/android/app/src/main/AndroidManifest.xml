@@ -22,6 +22,8 @@
          READ_CALL_LOG нужен с Android 9, чтобы номер входящего не был скрыт. -->
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.READ_CALL_LOG" />
+    <!-- Автосброс входящего звонка (TelecomManager.endCall, Android 9+) -->
+    <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
     <!-- Чтобы запросы по локальному IP без HTTPS работали (см. ниже про cleartext) -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- Wakelock для шлюзового режима -->
