@@ -73,6 +73,28 @@ class MainActivity : FlutterActivity() {
                             result.error("BT_SUPPORT_ERROR", e.message, null)
                         }
                     }
+                    "startGatewayService" -> {
+                        try {
+                            val i = Intent(this, GatewayForegroundService::class.java)
+                            if (android.os.Build.VERSION.SDK_INT >=
+                                    android.os.Build.VERSION_CODES.O) {
+                                startForegroundService(i)
+                            } else {
+                                startService(i)
+                            }
+                            result.success(true)
+                        } catch (e: Throwable) {
+                            result.error("FGS_ERROR", e.message, null)
+                        }
+                    }
+                    "stopGatewayService" -> {
+                        try {
+                            stopService(Intent(this, GatewayForegroundService::class.java))
+                            result.success(true)
+                        } catch (e: Throwable) {
+                            result.error("FGS_ERROR", e.message, null)
+                        }
+                    }
                     "requestCallPermissions" -> {
                         try {
                             ActivityCompat.requestPermissions(

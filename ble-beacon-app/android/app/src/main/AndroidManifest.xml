@@ -27,6 +27,11 @@
     <!-- Wakelock для шлюзового режима -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
+    <!-- Foreground-сервис: шлюз работает в фоне / с погашенным экраном -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
 
     <application
@@ -55,6 +60,12 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+
+        <!-- Foreground-сервис шлюза (держит процесс/скан в фоне) -->
+        <service
+            android:name=".GatewayForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
     </application>
     <queries>
         <intent>

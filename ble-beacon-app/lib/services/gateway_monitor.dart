@@ -10,6 +10,7 @@ import '../models/beacon.dart';
 import '../models/gateway.dart';
 import '../models/stown_packet.dart';
 import 'beacon_parser.dart';
+import 'gateway_logger.dart';
 import 'hm10_sender.dart';
 import 'incoming_call.dart';
 
@@ -196,6 +197,10 @@ class GatewayMonitor {
       st.nearSince = null;
       st.farSince = null;
     }
+
+    // Пишем RSSI-сэмпл матча в лог (трасса прохода для ВКР).
+    unawaited(GatewayLogger.instance
+        .rssi(vehicle.name, rssi, st.state == _Zone.near ? 'near' : 'far'));
   }
 
   /// Периодическая проверка: метка пропала из зоны на ≥ tFarMs → перевзвод.
@@ -233,6 +238,7 @@ class GatewayMonitor {
       EventLevel.success,
       'Открытие: ${vehicle.name} · $matchedFields · RSSI=$rssi',
     );
+    unawaited(GatewayLogger.instance.event('OPEN', vehicle.name, rssi));
 
     final info = <String, dynamic>{
       'vehicle': vehicle.name,
@@ -300,6 +306,7 @@ class GatewayMonitor {
     _lastTrigger[vehicle.name] = now;
 
     _emit(EventLevel.success, 'Открытие (звонок): ${vehicle.name} · …$last10');
+    unawaited(GatewayLogger.instance.event('OPEN_CALL', vehicle.name));
     _openFor(info: <String, dynamic>{
       'vehicle': vehicle.name,
       'source': 'call',

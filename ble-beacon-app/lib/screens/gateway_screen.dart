@@ -4,9 +4,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../models/gateway.dart';
+import '../services/gateway_foreground.dart';
+import '../services/gateway_logger.dart';
 import '../services/gateway_monitor.dart';
 import '../services/gateway_storage.dart';
 import '../services/hm10_sender.dart';
@@ -143,6 +146,7 @@ class _GatewayScreenState extends State<GatewayScreen> {
   Future<void> _toggle() async {
     if (_running) {
       await _monitor.stop();
+      await GatewayForeground.stop();
       await WakelockPlus.disable();
       setState(() => _running = false);
       return;
@@ -195,8 +199,11 @@ class _GatewayScreenState extends State<GatewayScreen> {
       _snack('Нужны разрешения Bluetooth');
       return;
     }
+    // Разрешение на уведомление (Android 13+) — для foreground-сервиса.
+    await Permission.notification.request();
 
     await WakelockPlus.enable();
+    await GatewayForeground.start(); // фоновая работа с погашенным экраном
     await _monitor.start();
     if (mounted) setState(() => _running = true);
   }
@@ -204,6 +211,26 @@ class _GatewayScreenState extends State<GatewayScreen> {
   void _snack(String msg) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  /// Экспорт CSV-лога проездов/RSSI (поделиться файлом).
+  Future<void> _exportLog() async {
+    try {
+      final size = await GatewayLogger.instance.sizeBytes();
+      if (size <= 40) {
+        _snack('Лог пуст');
+        return;
+      }
+      final path = await GatewayLogger.instance.fileForExport();
+      await Share.shareXFiles([XFile(path)], subject: 'STOWN gateway log');
+    } catch (e) {
+      _snack('Экспорт: $e');
+    }
+  }
+
+  Future<void> _clearLogFile() async {
+    await GatewayLogger.instance.clear();
+    _snack('Лог-файл очищен');
   }
 
   void _onEvent(GatewayEvent e) {
@@ -1107,11 +1134,22 @@ class _GatewayScreenState extends State<GatewayScreen> {
                   text: 'Журнал событий',
                 ),
               ),
+              IconButton(
+                icon: const Icon(Icons.ios_share, color: AppColors.primary),
+                tooltip: 'Экспорт лога (CSV)',
+                onPressed: _exportLog,
+              ),
+              IconButton(
+                icon: const Icon(Icons.delete_outline,
+                    color: AppColors.onSurfaceMuted),
+                tooltip: 'Очистить лог-файл',
+                onPressed: _clearLogFile,
+              ),
               if (_log.isNotEmpty)
                 IconButton(
                   icon: const Icon(Icons.clear_all,
                       color: AppColors.onSurfaceMuted),
-                  tooltip: 'Очистить',
+                  tooltip: 'Очистить экран',
                   onPressed: () => setState(_log.clear),
                 ),
             ],
