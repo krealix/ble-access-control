@@ -2,12 +2,14 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../models/gateway.dart';
 import '../services/gateway_monitor.dart';
 import '../services/gateway_storage.dart';
+import '../services/hm10_sender.dart';
 import '../services/incoming_call.dart';
 import '../theme.dart';
 import '../widgets/common.dart';
@@ -815,14 +817,153 @@ class _GatewayScreenState extends State<GatewayScreen> {
           _textField(
             _hm10Ctrl,
             'HM-10 адрес (MAC)',
-            hint: 'MAC модуля, напр. E0:E5:CF:A2:BB:46. Скопируйте из «Сканера».',
+            hint: 'MAC модуля. Нажмите «Найти» или скопируйте из «Сканера».',
             icon: Icons.bluetooth,
+          ),
+          const SizedBox(height: 8),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: OutlinedButton.icon(
+              onPressed: _running ? null : _pickHm10,
+              icon: const Icon(Icons.bluetooth_searching, size: 18),
+              label: const Text('Найти HM-10'),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: AppColors.primary,
+                side: const BorderSide(color: AppColors.divider),
+              ),
+            ),
           ),
           const SizedBox(height: 12),
           _lockField(),
           const SizedBox(height: 8),
           _commandsHint(),
         ];
+    }
+  }
+
+  /// Сканирует эфир и даёт выбрать HM-10 из списка (как в «Сканере») —
+  /// без ручного ввода MAC. Подставляет remoteId в поле адреса.
+  Future<void> _pickHm10() async {
+    if (_running) return;
+    if (!await _ensurePermissions()) {
+      _snack('Нужны разрешения Bluetooth');
+      return;
+    }
+
+    final results = <ScanResult>[];
+    StreamSubscription<List<ScanResult>>? sub;
+    try {
+      await Hm10Sender.instance.startScan(timeout: const Duration(seconds: 12));
+    } catch (e) {
+      _snack('Скан: $e');
+      return;
+    }
+    if (!mounted) {
+      await Hm10Sender.instance.stopScan();
+      return;
+    }
+
+    final picked = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: AppColors.surface,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheet) {
+          sub ??= Hm10Sender.instance.scanResults.listen((rs) {
+            results
+              ..clear()
+              ..addAll(rs);
+            results.sort((a, b) {
+              final ah = Hm10Sender.looksLikeHm10(a) ? 0 : 1;
+              final bh = Hm10Sender.looksLikeHm10(b) ? 0 : 1;
+              if (ah != bh) return ah - bh;
+              return b.rssi.compareTo(a.rssi);
+            });
+            setSheet(() {});
+          });
+          return SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    children: [
+                      const Expanded(
+                        child: Text('Выберите HM-10',
+                            style: TextStyle(
+                                color: AppColors.onSurface,
+                                fontSize: 16,
+                                fontWeight: FontWeight.w700)),
+                      ),
+                      const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  if (results.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 16),
+                      child: Text('Поиск устройств рядом…',
+                          style: TextStyle(color: AppColors.onSurfaceMuted)),
+                    )
+                  else
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 360),
+                      child: ListView(
+                        shrinkWrap: true,
+                        children: results.map((r) {
+                          final isHm = Hm10Sender.looksLikeHm10(r);
+                          final name = r.advertisementData.advName.isEmpty
+                              ? '(без имени)'
+                              : r.advertisementData.advName;
+                          return ListTile(
+                            leading: Icon(
+                              isHm ? Icons.sensors : Icons.bluetooth,
+                              color: isHm
+                                  ? AppColors.primary
+                                  : AppColors.onSurfaceMuted,
+                            ),
+                            title: Text(name,
+                                style: TextStyle(
+                                  color: AppColors.onSurface,
+                                  fontWeight:
+                                      isHm ? FontWeight.w700 : FontWeight.w500,
+                                )),
+                            subtitle: Text(r.device.remoteId.str,
+                                style: const TextStyle(
+                                    color: AppColors.onSurfaceMuted,
+                                    fontFamily: 'monospace',
+                                    fontSize: 12)),
+                            trailing: Text('${r.rssi}',
+                                style: const TextStyle(
+                                    color: AppColors.onSurfaceMuted,
+                                    fontSize: 12)),
+                            onTap: () =>
+                                Navigator.pop(ctx, r.device.remoteId.str),
+                          );
+                        }).toList(),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+
+    await sub?.cancel();
+    await Hm10Sender.instance.stopScan();
+    if (picked != null && mounted) {
+      setState(() => _hm10Ctrl.text = picked.toUpperCase());
     }
   }
 
