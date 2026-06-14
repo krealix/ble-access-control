@@ -175,16 +175,23 @@ class GatewayMonitor {
     final st = _fsm.putIfAbsent(key, () => _TagState());
     st.lastSeen = now;
 
-    if (rssi >= config.rssiNear) {
+    // EMA-сглаживание: гасит редкие всплески RSSI перед порогами.
+    st.ema = st.ema == null
+        ? rssi.toDouble()
+        : _emaAlpha * rssi + (1 - _emaAlpha) * st.ema!;
+    final srssi = st.ema!.round();
+    st.lastRssi = srssi;
+
+    if (srssi >= config.rssiNear) {
       st.farSince = null;
       st.nearSince ??= now;
       if (st.state == _Zone.far &&
           now.difference(st.nearSince!).inMilliseconds >= config.tCloseMs) {
         st.state = _Zone.near;
         _trigger(vehicle, advUuid, advMac, advMajor, advMinor, advStownId,
-            advKey, rssi);
+            advKey, srssi);
       }
-    } else if (rssi <= config.rssiFar) {
+    } else if (srssi <= config.rssiFar) {
       st.nearSince = null;
       st.farSince ??= now;
       if (st.state == _Zone.near &&
@@ -198,10 +205,20 @@ class GatewayMonitor {
       st.farSince = null;
     }
 
-    // Пишем RSSI-сэмпл матча в лог (трасса прохода для ВКР).
+    // В лог пишем СЫРОЙ RSSI (для офлайн-анализа траектории) + текущую зону.
     unawaited(GatewayLogger.instance
         .rssi(vehicle.name, rssi, st.state == _Zone.near ? 'near' : 'far'));
   }
+
+  /// Снимок живого состояния меток для UI (зона/RSSI/последний контакт).
+  Map<String, TagLive> liveSnapshot() => {
+        for (final e in _fsm.entries)
+          e.key: TagLive(
+            zone: e.value.state == _Zone.near ? 'near' : 'far',
+            rssi: e.value.lastRssi,
+            lastSeen: e.value.lastSeen,
+          ),
+      };
 
   /// Периодическая проверка: метка пропала из зоны на ≥ tFarMs → перевзвод.
   void _checkAbsence() {
@@ -438,6 +455,9 @@ class GatewayMonitor {
   }
 }
 
+/// Коэффициент EMA-сглаживания RSSI (0..1; больше — отзывчивее, меньше — глаже).
+const double _emaAlpha = 0.4;
+
 /// Зона метки в гистерезисе.
 enum _Zone { far, near }
 
@@ -447,4 +467,14 @@ class _TagState {
   DateTime? nearSince; // когда RSSI впервые стал ≥ P_close непрерывно
   DateTime? farSince; // когда RSSI ≤ P_dist непрерывно
   DateTime lastSeen = DateTime.now();
+  double? ema; // сглаженный RSSI
+  int lastRssi = -127; // последний сглаженный RSSI (для UI)
+}
+
+/// Снимок живого состояния метки для UI.
+class TagLive {
+  TagLive({required this.zone, required this.rssi, required this.lastSeen});
+  final String zone; // 'near' | 'far'
+  final int rssi;
+  final DateTime lastSeen;
 }

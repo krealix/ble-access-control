@@ -56,6 +56,9 @@ class _GatewayScreenState extends State<GatewayScreen> {
   // Selected transport (mirror of config.transport for UI state)
   GatewayTransport _transport = GatewayTransport.http;
 
+  // Обновление «живого статуса» меток во время работы
+  Timer? _liveTimer;
+
   @override
   void initState() {
     super.initState();
@@ -67,6 +70,7 @@ class _GatewayScreenState extends State<GatewayScreen> {
   @override
   void dispose() {
     _eventSub?.cancel();
+    _liveTimer?.cancel();
     _monitor.dispose();
     WakelockPlus.disable();
     _haUrlCtrl.dispose();
@@ -148,6 +152,8 @@ class _GatewayScreenState extends State<GatewayScreen> {
       await _monitor.stop();
       await GatewayForeground.stop();
       await WakelockPlus.disable();
+      _liveTimer?.cancel();
+      _liveTimer = null;
       setState(() => _running = false);
       return;
     }
@@ -205,6 +211,8 @@ class _GatewayScreenState extends State<GatewayScreen> {
     await WakelockPlus.enable();
     await GatewayForeground.start(); // фоновая работа с погашенным экраном
     await _monitor.start();
+    _liveTimer = Timer.periodic(
+        const Duration(seconds: 1), (_) => mounted ? setState(() {}) : null);
     if (mounted) setState(() => _running = true);
   }
 
@@ -605,6 +613,10 @@ class _GatewayScreenState extends State<GatewayScreen> {
             child: ListView(
               padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
               children: [
+                if (_running) ...[
+                  _liveStatusCard(),
+                  const SizedBox(height: 12),
+                ],
                 _settingsCard(),
                 const SizedBox(height: 12),
                 _vehiclesCard(),
@@ -632,6 +644,103 @@ class _GatewayScreenState extends State<GatewayScreen> {
     );
   }
 
+
+  /// Живой статус авторизованных меток: зона, RSSI, давность контакта.
+  Widget _liveStatusCard() {
+    final snap = _monitor.liveSnapshot();
+    final now = DateTime.now();
+    return StownCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              const Expanded(
+                child: _SectionHeader(icon: Icons.radar, text: 'Живой статус'),
+              ),
+              if (_transport == GatewayTransport.hm10) _hm10IndicatorChip(),
+            ],
+          ),
+          const SizedBox(height: 8),
+          if (snap.isEmpty)
+            const Text('Меток в зоне нет…',
+                style: TextStyle(color: AppColors.onSurfaceMuted))
+          else
+            ...snap.entries.map((e) => _liveRow(e.key, e.value, now)),
+        ],
+      ),
+    );
+  }
+
+  Widget _liveRow(String name, TagLive live, DateTime now) {
+    final near = live.zone == 'near';
+    final ago = now.difference(live.lastSeen).inSeconds;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(
+        children: [
+          Container(
+            width: 10,
+            height: 10,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: near ? AppColors.success : AppColors.onSurfaceMuted,
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                    color: AppColors.onSurface, fontWeight: FontWeight.w600)),
+          ),
+          Text(near ? 'рядом' : 'далеко',
+              style: TextStyle(
+                  color: near ? AppColors.success : AppColors.onSurfaceMuted,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600)),
+          const SizedBox(width: 10),
+          SizedBox(
+            width: 46,
+            child: Text('${live.rssi}',
+                textAlign: TextAlign.end,
+                style: const TextStyle(
+                    color: AppColors.onSurface,
+                    fontFamily: 'monospace',
+                    fontSize: 13)),
+          ),
+          const SizedBox(width: 8),
+          SizedBox(
+            width: 44,
+            child: Text(ago <= 1 ? 'сейчас' : '$ago с',
+                textAlign: TextAlign.end,
+                style: const TextStyle(
+                    color: AppColors.onSurfaceMuted, fontSize: 11)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Индикатор постоянного подключения к HM-10.
+  Widget _hm10IndicatorChip() {
+    return ValueListenableBuilder<bool>(
+      valueListenable: Hm10Sender.instance.connected,
+      builder: (_, conn, _) => Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(conn ? Icons.bluetooth_connected : Icons.bluetooth_disabled,
+              size: 16, color: conn ? AppColors.success : AppColors.danger),
+          const SizedBox(width: 4),
+          Text(conn ? 'HM-10 ✓' : 'HM-10 ✕',
+              style: TextStyle(
+                  color: conn ? AppColors.success : AppColors.onSurfaceMuted,
+                  fontSize: 12)),
+        ],
+      ),
+    );
+  }
 
   Widget _settingsCard() {
     return StownCard(

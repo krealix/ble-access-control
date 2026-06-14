@@ -1,6 +1,6 @@
 import 'dart:async';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
 /// Отправка байт на HM-10 по GATT: подключение → discoverServices →
@@ -23,6 +23,9 @@ class Hm10Sender {
   BluetoothDevice? _persistentDevice;
   BluetoothCharacteristic? _persistentChar;
   StreamSubscription<BluetoothConnectionState>? _connSub;
+
+  /// Состояние постоянного подключения для индикатора в UI.
+  final ValueNotifier<bool> connected = ValueNotifier<bool>(false);
 
   bool get persistentConnected =>
       _persistentChar != null && (_persistentDevice?.isConnected ?? false);
@@ -60,9 +63,11 @@ class Hm10Sender {
 
     _persistentDevice = device;
     _persistentChar = target;
+    connected.value = true;
     _connSub = device.connectionState.listen((st) {
       if (st == BluetoothConnectionState.disconnected) {
         _persistentChar = null;
+        connected.value = false;
       }
     });
     onLog?.call('Подключено (постоянно)');
@@ -83,6 +88,7 @@ class Hm10Sender {
     await _connSub?.cancel();
     _connSub = null;
     _persistentChar = null;
+    connected.value = false;
     final d = _persistentDevice;
     _persistentDevice = null;
     if (d != null) {
