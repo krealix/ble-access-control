@@ -1045,17 +1045,12 @@ class _GatewayScreenState extends State<GatewayScreen> {
           children: [
             Expanded(
               child: _textField(_grantDistCtrl, 'Зона доступа, м',
-                  hint: 'радиус', numeric: true, decimal: true),
+                  hint: 'радиус зоны', numeric: true, decimal: true),
             ),
             const SizedBox(width: 8),
             Expanded(
               child: _textField(_approachCtrl, 'Проб подряд',
                   hint: 'приближается', numeric: true),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: _textField(_trendEpsCtrl, 'Порог тренда',
-                  hint: 'dBm/с', numeric: true, decimal: true),
             ),
           ],
         ),
@@ -1064,19 +1059,24 @@ class _GatewayScreenState extends State<GatewayScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Expanded(
+              child: _textField(_trendEpsCtrl, 'Порог тренда',
+                  hint: 'наклон, dBm/с', numeric: true, decimal: true),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
               child: _textField(_txPowerCtrl, 'RSSI на 1 м',
                   hint: 'калибровка',
                   numeric: true,
                   decimal: true,
                   allowNegative: true),
             ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: _textField(_pathLossCtrl, 'Затухание n',
-                  hint: 'среда 2..4', numeric: true, decimal: true),
-            ),
           ],
         ),
+        const SizedBox(height: 12),
+        _textField(_pathLossCtrl, 'Затухание n',
+            hint: 'показатель среды, обычно 2..4',
+            numeric: true,
+            decimal: true),
         const SizedBox(height: 8),
         const Text(
           'RSSI сглаживается фильтром Калмана и переводится в дистанцию по '
