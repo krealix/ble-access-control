@@ -6,7 +6,7 @@ enum BeaconKind {
   eddystoneUid('Eddy UID'),
   eddystoneUrl('Eddy URL'),
   eddystoneTlm('Eddy TLM'),
-  stown('Метка'),
+  stown('STOWN'),
   custom('Custom'),
   generic('Generic');
 
