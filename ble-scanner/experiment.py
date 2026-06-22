@@ -136,25 +136,26 @@ def load_csv(path: str) -> list[tuple[float, float]]:
     return series
 
 
-def analyze(csv_path: str, out_png: str, *, grant_distance: float = 2.0,
-            approach_samples: int = 4) -> None:
+def analyze(csv_path: str, out_png: str, *, near_rssi: int = -65,
+            far_rssi: int = -85, far_hold_x: int = 3, near_hold_y: int = 3) -> None:
     series = load_csv(csv_path)
     if len(series) < 5:
         print(f"Слишком мало данных в {csv_path} ({len(series)} строк).")
         sys.exit(1)
 
-    analyzer = TrajectoryAnalyzer(grant_distance=grant_distance,
-                                  approach_samples=approach_samples)
+    analyzer = TrajectoryAnalyzer(near_rssi=near_rssi, far_rssi=far_rssi,
+                                  far_hold_x=far_hold_x, near_hold_y=near_hold_y)
     samples = [analyzer.push(t, rssi) for t, rssi in series]
 
     # Сводка переходов состояний
-    print("t,с    RSSI  сглаж  дист,м  тренд   состояние")
+    print("t,с    RSSI  дист,м  зона     A  B  состояние")
     prev = None
     granted_at = None
     for s in samples:
         if s.state != prev:
-            print(f"{s.t:6.1f} {s.rssi_raw:6.1f} {s.rssi_smooth:6.1f} "
-                  f"{s.distance:6.2f} {s.trend:6.2f}  {s.state.value}")
+            print(f"{s.t:6.1f} {s.rssi_raw:6.1f} {s.distance:6.2f}  "
+                  f"{s.zone.value:8s} {s.a:2d} {('-' if s.b is None else s.b):>2}"
+                  f"  {s.state.value}")
         if granted_at is None and s.state == Access.GRANTED:
             granted_at = s.t
         prev = s.state
@@ -164,44 +165,33 @@ def analyze(csv_path: str, out_png: str, *, grant_distance: float = 2.0,
     else:
         print("Доступ не разрешён (приближение не подтверждено)")
 
-    _plot(samples, grant_distance, out_png)
+    _plot(samples, analyzer.algo, out_png)
     print(f"График сохранён: {out_png}")
 
 
-def _plot(samples, grant_distance: float, out_png: str) -> None:
+def _plot(samples, algo, out_png: str) -> None:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     t = [s.t for s in samples]
     raw = [s.rssi_raw for s in samples]
-    smooth = [s.rssi_smooth for s in samples]
-    dist = [s.distance for s in samples]
     granted = [s.t for s in samples if s.state == Access.GRANTED]
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
-
-    ax1.plot(t, raw, ".", color="#9AA7BD", label="RSSI (сырой, измеренный)", alpha=0.6)
-    ax1.plot(t, smooth, "-", color="#2D8CFF", linewidth=2,
-             label="RSSI (фильтр Калмана)")
+    fig, ax = plt.subplots(figsize=(10, 5.5))
+    ax.plot(t, raw, "-o", color="#2D8CFF", ms=3, lw=1.2, label="RSSI (измеренный)")
+    ax.axhline(algo.near_rssi, color="#22C55E", ls="--",
+               label=f"Порог «близко» A = {algo.near_rssi} dBm")
+    ax.axhline(algo.far_rssi, color="#E07B39", ls="--",
+               label=f"Порог «далеко» B = {algo.far_rssi} dBm")
     if granted:
-        ax1.axvspan(min(granted), max(granted), color="#22C55E", alpha=0.18,
-                    label="Доступ разрешён")
-    ax1.set_ylabel("RSSI, dBm")
-    ax1.set_title("Натурный эксперимент: траектория RSSI реального прохода и решение")
-    ax1.legend(loc="lower center", ncol=3, fontsize=9)
-    ax1.grid(True, alpha=0.3)
-
-    ax2.plot(t, dist, "-", color="#E07B39", linewidth=2, label="Оценка расстояния")
-    ax2.axhline(grant_distance, color="#22C55E", linestyle="--",
-                label=f"Зона доступа ≤ {grant_distance:g} м")
-    if granted:
-        ax2.axvspan(min(granted), max(granted), color="#22C55E", alpha=0.18)
-    ax2.set_xlabel("Время, с")
-    ax2.set_ylabel("Расстояние, м")
-    ax2.legend(loc="upper center", ncol=2, fontsize=9)
-    ax2.grid(True, alpha=0.3)
-
+        ax.axvspan(min(granted), max(granted), color="#22C55E", alpha=0.18,
+                   label="Доступ разрешён")
+    ax.set_xlabel("Время, с")
+    ax.set_ylabel("RSSI, dBm")
+    ax.set_title("Натурный эксперимент: траектория RSSI реального прохода и решение")
+    ax.legend(loc="lower center", ncol=2, fontsize=9)
+    ax.grid(True, alpha=0.3)
     fig.tight_layout()
     fig.savefig(out_png, dpi=130)
 
@@ -234,16 +224,18 @@ def main() -> None:
     pa = sub.add_parser("analyze", help="Проанализировать CSV и построить график")
     pa.add_argument("csv", help="Файл CSV с колонками t,rssi")
     pa.add_argument("--out", default="real_pass.png", help="PNG-график")
-    pa.add_argument("--grant-distance", type=float, default=2.0)
-    pa.add_argument("--approach-samples", type=int, default=4)
+    pa.add_argument("--near-rssi", type=int, default=-65, help="Порог «близко» A")
+    pa.add_argument("--far-rssi", type=int, default=-85, help="Порог «далеко» B")
+    pa.add_argument("--far-hold-x", type=int, default=3, help="Удержание «далеко» X")
+    pa.add_argument("--near-hold-y", type=int, default=3, help="Удержание «близко» Y")
 
     args = p.parse_args()
     if args.cmd == "record":
         asyncio.run(record(args.out, uuid=args.uuid, mac=args.mac,
                            name=args.name, duration=args.duration))
     elif args.cmd == "analyze":
-        analyze(args.csv, args.out, grant_distance=args.grant_distance,
-                approach_samples=args.approach_samples)
+        analyze(args.csv, args.out, near_rssi=args.near_rssi, far_rssi=args.far_rssi,
+                far_hold_x=args.far_hold_x, near_hold_y=args.near_hold_y)
 
 
 if __name__ == "__main__":

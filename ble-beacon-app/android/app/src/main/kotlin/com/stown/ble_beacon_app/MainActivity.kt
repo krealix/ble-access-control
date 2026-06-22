@@ -24,6 +24,10 @@ class MainActivity : FlutterActivity() {
 
     private var callReceiver: BroadcastReceiver? = null
 
+    // Ожидающий результат запроса разрешений «телефона» (заполняется в
+    // onRequestPermissionsResult). Нужен, чтобы Dart узнал, выдан ли сброс.
+    private var pendingPermResult: MethodChannel.Result? = null
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channel)
@@ -100,32 +104,46 @@ class MainActivity : FlutterActivity() {
                     }
                     "requestCallPermissions" -> {
                         try {
+                            val withHangup =
+                                call.argument<Boolean>("withHangup") ?: false
+                            val perms = ArrayList<String>()
+                            perms.add(Manifest.permission.READ_PHONE_STATE)
+                            perms.add(Manifest.permission.READ_CALL_LOG)
+                            // ANSWER_PHONE_CALLS появилось в API 26 (O).
+                            if (withHangup && Build.VERSION.SDK_INT >=
+                                    Build.VERSION_CODES.O) {
+                                perms.add(Manifest.permission.ANSWER_PHONE_CALLS)
+                            }
+                            // Все разрешения «телефона» запрашиваем ОДНИМ вызовом:
+                            // система показывает только один диалог за раз, поэтому
+                            // два отдельных requestPermissions приводят к тому, что
+                            // второй (ANSWER_PHONE_CALLS) молча отбрасывается.
+                            pendingPermResult?.let {
+                                try {
+                                    it.success(null)
+                                } catch (_: Throwable) {}
+                            }
+                            pendingPermResult = result
                             ActivityCompat.requestPermissions(
-                                this,
-                                arrayOf(
-                                    Manifest.permission.READ_PHONE_STATE,
-                                    Manifest.permission.READ_CALL_LOG,
-                                ),
-                                7001,
-                            )
-                            result.success(true)
+                                this, perms.toTypedArray(), 7001)
                         } catch (e: Throwable) {
+                            pendingPermResult = null
                             result.error("PERM_ERROR", e.message, null)
                         }
                     }
-                    "requestHangupPermission" -> {
+                    "openAppSettings" -> {
                         try {
-                            if (android.os.Build.VERSION.SDK_INT >=
-                                    android.os.Build.VERSION_CODES.O) {
-                                ActivityCompat.requestPermissions(
-                                    this,
-                                    arrayOf(Manifest.permission.ANSWER_PHONE_CALLS),
-                                    7002,
-                                )
-                            }
+                            val intent = Intent(
+                                android.provider.Settings
+                                    .ACTION_APPLICATION_DETAILS_SETTINGS,
+                                android.net.Uri.fromParts(
+                                    "package", packageName, null),
+                            )
+                            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            startActivity(intent)
                             result.success(true)
                         } catch (e: Throwable) {
-                            result.error("PERM_ERROR", e.message, null)
+                            result.error("SETTINGS_ERROR", e.message, null)
                         }
                     }
                     "endCall" -> {
@@ -177,6 +195,32 @@ class MainActivity : FlutterActivity() {
             })
     }
 
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != 7001) return
+        val map = HashMap<String, Boolean>()
+        for (i in permissions.indices) {
+            map[permissions[i]] = i < grantResults.size &&
+                grantResults[i] == PackageManager.PERMISSION_GRANTED
+        }
+        // Итоговый факт: реально ли сейчас доступен сброс звонка.
+        map["hangupGranted"] =
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
+            ContextCompat.checkSelfPermission(
+                this, Manifest.permission.ANSWER_PHONE_CALLS,
+            ) == PackageManager.PERMISSION_GRANTED
+        pendingPermResult?.let {
+            try {
+                it.success(map)
+            } catch (_: Throwable) {}
+        }
+        pendingPermResult = null
+    }
+
     override fun onDestroy() {
         callReceiver?.let {
             try {
@@ -188,23 +232,36 @@ class MainActivity : FlutterActivity() {
     }
 
     /// Сбрасывает текущий звонок через TelecomManager.endCall() (API 28+,
-    /// нужно разрешение ANSWER_PHONE_CALLS). Возвращает true при успехе.
-    private fun endCurrentCall(): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return false
+    /// нужно разрешение ANSWER_PHONE_CALLS). Возвращает строку-статус для
+    /// диагностики: ok / no_permission / api_too_old / no_telecom /
+    /// endcall_false / error.
+    private fun endCurrentCall(): String {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return "api_too_old"
         if (ContextCompat.checkSelfPermission(
                 this,
                 Manifest.permission.ANSWER_PHONE_CALLS,
             ) != PackageManager.PERMISSION_GRANTED
         ) {
-            return false
+            return "no_permission"
         }
         val tm = getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
-            ?: return false
+            ?: return "no_telecom"
         return try {
             @Suppress("MissingPermission")
-            tm.endCall()
+            val ok = tm.endCall()
+            // Повтор через 600 мс: состояние звонка могло ещё не установиться
+            // в момент RINGING.
+            if (!ok) {
+                android.os.Handler(mainLooper).postDelayed({
+                    try {
+                        @Suppress("MissingPermission")
+                        tm.endCall()
+                    } catch (_: Throwable) {}
+                }, 600)
+            }
+            if (ok) "ok" else "endcall_false"
         } catch (e: Throwable) {
-            false
+            "error: ${e.message}"
         }
     }
 

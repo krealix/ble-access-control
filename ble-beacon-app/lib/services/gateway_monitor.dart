@@ -9,12 +9,13 @@ import 'package:http/http.dart' as http;
 import '../models/beacon.dart';
 import '../models/gateway.dart';
 import '../models/stown_packet.dart';
+import 'access_algorithm.dart';
+import 'algo_logger.dart';
 import 'beacon_parser.dart';
 import 'gateway_logger.dart';
 import 'hm10_sender.dart';
 import 'incoming_call.dart';
 import 'rolling_code.dart';
-import 'trajectory.dart';
 
 /// Сервис мониторинга у шлагбаума: сканирует BLE, проверяет авторизацию,
 /// отправляет сигнал в выбранном транспорте (HTTP / TCP / MQTT).
@@ -38,19 +39,44 @@ class GatewayMonitor {
   StreamSubscription<String>? _callSub;
   Timer? _absenceTimer;
 
-  /// Состояние «мёртвой зоны» per-vehicle (BLE-открытие).
-  final Map<String, _TagState> _fsm = {};
+  /// Алгоритм доступа по гистерезису зон сигнала. Состояние счётчиков ведётся
+  /// внутри по ключу метки (для авторизованных — по имени ТС, иначе по id/MAC).
+  late ZoneAccessAlgorithm _algo = _newAlgo();
 
-  /// Анализатор траектории per-vehicle (режим decisionMode == 'trajectory').
-  final Map<String, TrajectoryAnalyzer> _traj = {};
+  /// Когда последний раз видели метку (по ключу алгоритма) — для удаления
+  /// записей пропавших меток (absenceSeconds).
+  final Map<String, DateTime> _lastSeen = {};
 
-  /// Когда последний раз открывали по звонку (cooldown для звонков).
+  /// Когда последний раз прогоняли алгоритм по метке — троттлинг опроса до
+  /// config.pollHz раз в секунду (период [_pollMs]).
+  final Map<String, DateTime> _lastProc = {};
+
+  /// Период опроса метки (мс) = 1000 / pollHz. При pollHz ≤ 0 троттлинг
+  /// отключён (обрабатываются все приёмы рекламы).
+  int get _pollMs => config.pollHz > 0 ? (1000 / config.pollHz).round() : 0;
+
+  /// Момент запуска мониторинга. В течение [_startupGraceMs] после старта
+  /// открытия не отправляются («прогрев»): это гасит залп открытий в момент
+  /// включения, когда в зону сразу попадает пачка меток. Подавляются только
+  /// открытия; счётчики удержания при этом продолжают расти.
+  DateTime? _startedAt;
+  static const int _startupGraceMs = 3000;
+
+  bool get _inStartupGrace =>
+      _startedAt != null &&
+      DateTime.now().difference(_startedAt!).inMilliseconds < _startupGraceMs;
+
+  /// Живое состояние авторизованных меток для UI (по имени ТС).
+  final Map<String, TagLive> _live = {};
+
+  /// Когда последний раз открывали по метке/звонку (антидребезг открытий).
   final Map<String, DateTime> _lastTrigger = {};
 
   Future<void> start() async {
     if (_running) return;
     _running = true;
-    _emit(EventLevel.info, 'Мониторинг запущен');
+    _startedAt = DateTime.now();
+    _emit(EventLevel.info, 'Мониторинг запущен (прогрев…)');
 
     try {
       if (FlutterBluePlus.adapterStateNow != BluetoothAdapterState.on) {
@@ -65,8 +91,11 @@ class GatewayMonitor {
 
       _scanSub = FlutterBluePlus.scanResults.listen(_onResults);
       await _beginScan();
-      _fsm.clear();
-      _traj.clear();
+      _algo = _newAlgo();
+      _lastSeen.clear();
+      _lastProc.clear();
+      _live.clear();
+      AlgoLogger.instance.enabled = config.algoLogging;
       _absenceTimer = Timer.periodic(
           const Duration(seconds: 1), (_) => _checkAbsence());
 
@@ -75,9 +104,18 @@ class GatewayMonitor {
       final hasPhone = config.whitelist
           .any((v) => (v.matchKey ?? '').toUpperCase().startsWith('PHONE:'));
       if (config.callAccessEnabled && hasPhone) {
-        await IncomingCall.requestPermissions();
-        if (config.callHangup) await IncomingCall.requestHangupPermission();
+        // Все разрешения «телефона» запрашиваем одним диалогом; для сброса
+        // звонка узнаём, реально ли выдано ANSWER_PHONE_CALLS.
+        final hangupOk = await IncomingCall.requestCallPermissions(
+            withHangup: config.callHangup);
         _callSub = IncomingCall.instance.numbers.listen(_onIncomingCall);
+        if (config.callHangup && !hangupOk) {
+          _emit(
+              EventLevel.warning,
+              'Нет разрешения «Управление вызовами» — сброс звонка не сработает. '
+              'Выдайте его кнопкой «Разрешение на сброс» или в настройках '
+              'приложения (раздел «Телефон»).');
+        }
         _emit(
             EventLevel.info,
             config.callHangup
@@ -118,18 +156,32 @@ class GatewayMonitor {
     _callSub = null;
     _absenceTimer?.cancel();
     _absenceTimer = null;
-    _fsm.clear();
-    _traj.clear();
+    _algo.clear();
+    _lastSeen.clear();
+    _lastProc.clear();
+    _live.clear();
+    await AlgoLogger.instance.flushClose();
     await Hm10Sender.instance.disconnectPersistent();
     _emit(EventLevel.info, 'Мониторинг остановлен');
   }
 
   void updateConfig(GatewayConfig newConfig) {
     config = newConfig;
-    _fsm.clear();
-    _traj.clear();
+    _algo = _newAlgo();
+    _lastSeen.clear();
+    _lastProc.clear();
+    _live.clear();
+    AlgoLogger.instance.enabled = config.algoLogging;
     _emit(EventLevel.info, 'Настройки обновлены');
   }
+
+  /// Создаёт алгоритм с параметрами из текущей конфигурации.
+  ZoneAccessAlgorithm _newAlgo() => ZoneAccessAlgorithm(
+        nearRssi: config.nearRssi,
+        farRssi: config.farRssi,
+        farHoldX: config.farHoldX,
+        nearHoldY: config.nearHoldY,
+      );
 
   void _onResults(List<ScanResult> results) {
     for (final r in results) {
@@ -184,101 +236,102 @@ class GatewayMonitor {
         break;
       }
     }
-    if (vehicle == null) return;
+    // Алгоритм гоняется по ВСЕМ меткам: при «подходе» пакет уходит и для меток
+    // не из базы (один пакет 88<MAC>), и для авторизованных (два пакета).
+    // Ключ алгоритма: для авторизованного ТС — стабильное имя (устойчиво к
+    // rolling-коду метки), иначе — id метки/MAC.
+    final tagId = advStownId ?? advMac;
+    final algoKey = vehicle != null ? 'V:${vehicle.name}' : 'T:$tagId';
+    final displayName = vehicle?.name ??
+        (advName.isNotEmpty ? advName : (advStownId != null ? 'STOWN' : tagId));
 
-    final key = vehicle.name;
     final now = DateTime.now();
-    final st = _fsm.putIfAbsent(key, () => _TagState());
-    st.lastSeen = now;
+    _lastSeen[algoKey] = now;
 
-    // Режим «Траектория» (ядро ВКР): Калман → лог-дистанция → тренд (МНК) → КА.
-    // Решение принимается по устойчивому приближению, а не по мгновенному порогу.
-    if (config.decisionMode == 'trajectory') {
-      final an = _traj.putIfAbsent(key, _newAnalyzer);
-      final s = an.push(now.millisecondsSinceEpoch / 1000.0, rssi.toDouble());
-      st.lastRssi = s.rssi.round();
-      // Для карточки живого статуса: «рядом» = доступ выдан/приближается.
-      st.state = (s.state == Access.granted || s.state == Access.approaching)
-          ? _Zone.near
-          : _Zone.far;
-      if (s.justGranted) {
-        _trigger(vehicle, advUuid, advMac, advMajor, advMinor, advStownId,
-            advKey, s.rssi.round());
-      }
-      unawaited(GatewayLogger.instance.rssi(vehicle.name, rssi, s.state.name));
+    // Опрос метки с частотой config.pollHz раз/сек: лишние приёмы между тиками
+    // пропускаем, чтобы счётчики A/B росли в стабильном темпе (шаг = 1000/pollHz мс).
+    final lastProc = _lastProc[algoKey];
+    if (lastProc != null && now.difference(lastProc).inMilliseconds < _pollMs) {
       return;
     }
+    _lastProc[algoKey] = now;
 
-    // «Мёртвая зона» (гистерезис): открываем при устойчивом «рядом» из
-    // состояния «далеко/армед»; повторно — только после устойчивого «далеко»
-    // (или пропажи из зоны, см. _checkAbsence). Это убирает постоянные открытия.
-    // EMA-сглаживание: гасит редкие всплески RSSI перед порогами.
-    st.ema = st.ema == null
-        ? rssi.toDouble()
-        : _emaAlpha * rssi + (1 - _emaAlpha) * st.ema!;
-    final srssi = st.ema!.round();
-    st.lastRssi = srssi;
+    // Гистерезис зон: rssi < B → «далеко» (B++), rssi > A → «близко» (A++).
+    // Открытие при удержании «близко» (A > Y); предварительный «взвод» «далеко»
+    // не требуется. Подробности — в access_algorithm.dart.
+    final sample = _algo.push(algoKey, rssi);
 
-    if (srssi >= config.rssiNear) {
-      st.farSince = null;
-      st.nearSince ??= now;
-      if (st.state == _Zone.far &&
-          now.difference(st.nearSince!).inMilliseconds >= config.tCloseMs) {
-        st.state = _Zone.near;
-        _trigger(vehicle, advUuid, advMac, advMajor, advMinor, advStownId,
-            advKey, srssi);
-      }
-    } else if (srssi <= config.rssiFar) {
-      st.nearSince = null;
-      st.farSince ??= now;
-      if (st.state == _Zone.near &&
-          now.difference(st.farSince!).inMilliseconds >= config.tFarMs) {
-        st.state = _Zone.far;
-        _emit(EventLevel.info, 'Перевзвод: ${vehicle.name} (отошла)');
-      }
-    } else {
-      // Между порогами — мёртвая зона: держим состояние, сбрасываем таймеры.
-      st.nearSince = null;
-      st.farSince = null;
+    if (vehicle != null) {
+      _live[vehicle.name] = TagLive(
+        zone: sample.zone.label,
+        rssi: rssi,
+        lastSeen: now,
+        a: sample.a,
+        b: sample.b,
+      );
     }
 
-    // В лог пишем СЫРОЙ RSSI (для офлайн-анализа траектории) + текущую зону.
-    unawaited(GatewayLogger.instance
-        .rssi(vehicle.name, rssi, st.state == _Zone.near ? 'near' : 'far'));
+    var opened = false;
+    if (sample.open) {
+      if (_inStartupGrace) {
+        // Прогрев после старта: открытие подавляется (гасим залп открытий в
+        // момент включения). Счётчики удержания при этом не сбрасываются.
+        _emit(EventLevel.info, 'Прогрев: открытие $displayName пропущено');
+      } else {
+        // Антидребезг по cooldownSeconds (на ключ метки/ТС).
+        final last = _lastTrigger[algoKey];
+        if (last == null ||
+            now.difference(last).inSeconds >= config.cooldownSeconds) {
+          _lastTrigger[algoKey] = now;
+          opened = true;
+          if (vehicle != null) {
+            // В базе → два пакета (01 00..00 + 88/89 <ID>).
+            _trigger(vehicle, advUuid, advMac, advMajor, advMinor, advStownId,
+                advKey, rssi);
+          } else {
+            // Не в базе → один пакет (88 <ID метки или MAC>).
+            _triggerUnknown(advStownId, advMac, rssi);
+          }
+        }
+      }
+    }
+
+    if (vehicle != null) {
+      // Аудит-лог матча (сырой RSSI + зона) — для главы 3 ВКР.
+      unawaited(
+          GatewayLogger.instance.rssi(vehicle.name, rssi, sample.zone.label));
+    }
+
+    // Трасса алгоритма по всем меткам (если включён тумблер логирования).
+    unawaited(AlgoLogger.instance.record(
+      id: tagId,
+      name: displayName,
+      rssi: rssi,
+      zone: sample.zone.label,
+      a: sample.a,
+      b: sample.b,
+      auth: vehicle != null,
+      open: opened,
+    ));
   }
 
-  /// Снимок живого состояния меток для UI (зона/RSSI/последний контакт).
-  Map<String, TagLive> liveSnapshot() => {
-        for (final e in _fsm.entries)
-          e.key: TagLive(
-            zone: e.value.state == _Zone.near ? 'near' : 'far',
-            rssi: e.value.lastRssi,
-            lastSeen: e.value.lastSeen,
-          ),
-      };
+  /// Снимок живого состояния авторизованных меток для UI.
+  Map<String, TagLive> liveSnapshot() => Map.of(_live);
 
-  /// Новый анализатор траектории с параметрами из конфигурации.
-  TrajectoryAnalyzer _newAnalyzer() => TrajectoryAnalyzer(
-        grantDistance: config.grantDistance,
-        approachSamples: config.approachSamples,
-        trendEps: config.trendEps,
-        txPower: config.txPower1m,
-        n: config.pathLossN,
-      );
-
-  /// Периодическая проверка: метка пропала из зоны на ≥ tFarMs → перевзвод.
+  /// Периодическая проверка: метка пропала из зоны на ≥ absenceSeconds —
+  /// удаляем её записи (как в спецификации алгоритма) и сбрасываем счётчики.
   void _checkAbsence() {
     final now = DateTime.now();
-    for (final e in _fsm.entries) {
-      final st = e.value;
-      if (st.state == _Zone.near &&
-          now.difference(st.lastSeen).inMilliseconds >= config.tFarMs) {
-        st.state = _Zone.far;
-        st.nearSince = null;
-        st.farSince = null;
-        // Сброс анализатора траектории, чтобы новое приближение перевзвело КА.
-        _traj.remove(e.key);
-      }
+    final gone = _lastSeen.entries
+        .where(
+            (e) => now.difference(e.value).inSeconds >= config.absenceSeconds)
+        .map((e) => e.key)
+        .toList();
+    for (final key in gone) {
+      _algo.remove(key);
+      _lastSeen.remove(key);
+      _lastProc.remove(key);
+      if (key.startsWith('V:')) _live.remove(key.substring(2));
     }
   }
 
@@ -317,37 +370,88 @@ class GatewayMonitor {
       'timestamp': DateTime.now().toIso8601String(),
     };
 
-    await _openFor(advStownId: advStownId, info: info);
+    // Идентификатор 2-го пакета: ID метки (STOWN, 7 байт) либо MAC-адрес
+    // (6 байт + 0). Команда открытия для BLE — cmd2 (по умолчанию 0x88).
+    final identifier =
+        advStownId != null ? _idBytes(advStownId) : _macBytes(advMac);
+    final openCmd = _cmdByte(config.cmd2Hex, 0x88);
+    // Устройство в базе → два пакета (подготовка + открытие).
+    await _openFor(
+        identifier: identifier, openCmd: openCmd, prep: true, info: info);
   }
 
-  /// Открытие выбранным транспортом: HTTP шлёт JSON [info]; TCP/HM-10 — две
-  /// команды (cmd1, пауза 500 мс, cmd2). Идентификатор (байты 2-8) во 2-м пакете
-  /// — это [idOverride] (напр. номер в BCD) или id метки; в 1-м пакете — нули,
-  /// если включён firstZeroId. Командные байты настраиваются (cmd1Hex/cmd2Hex).
+  /// Открытие для метки НЕ из локальной базы: один пакет (без подготовительного
+  /// 01). Идентификатор — STOWN-ID метки (если это STOWN-метка), иначе MAC.
+  /// Решение «открыть/нет» остаётся за контроллером (по его собственной базе).
+  Future<void> _triggerUnknown(String? advStownId, String advMac, int rssi) async {
+    // Для STOWN-метки — её 7-байтный ID (на Android MAC рандомизируется),
+    // иначе — MAC устройства (6 байт + 0).
+    final identifier =
+        advStownId != null ? _idBytes(advStownId) : _macBytes(advMac);
+    final who = advStownId != null ? 'ID $advStownId' : advMac;
+    _emit(EventLevel.info, 'Подход (не из базы): $who · RSSI=$rssi');
+    unawaited(GatewayLogger.instance.event('OPEN_UNKNOWN', who, rssi));
+    final openCmd = _cmdByte(config.cmd2Hex, 0x88);
+    await _openFor(
+      identifier: identifier,
+      openCmd: openCmd,
+      prep: false,
+      info: <String, dynamic>{
+        'stownId': advStownId,
+        'mac': advMac,
+        'source': 'ble_unknown',
+        'rssi': rssi,
+        'timestamp': DateTime.now().toIso8601String(),
+      },
+    );
+  }
+
+  /// Открытие выбранным транспортом: HTTP шлёт JSON [info]; TCP/HM-10 —
+  /// 10-байтные команды (при двух — пауза 1 мс между ними). Если [prep]
+  /// (устройство в базе) — перед командой открытия шлётся «подготовка»:
+  /// cmd1 + нули + номер замка («01 00..00 <замок>»). Команда открытия:
+  /// [openCmd] + [identifier] (ID метки/MAC, либо номер звонящего в BCD) + замок.
   Future<void> _openFor({
-    String? advStownId,
-    Uint8List? idOverride,
+    required Uint8List identifier,
+    required int openCmd,
+    required bool prep,
     required Map<String, dynamic> info,
   }) async {
-    final realId = idOverride ?? _idBytes(advStownId);
+    // Открытие с пустым (нулевым) идентификатором бессмысленно: контроллер не
+    // знает, кого пускать. Такой «нулевой» пакет 88/89 возникает, когда у
+    // устройства нет пригодного идентификатора (MAC «00:00:…», в т.ч. своя же
+    // реклама; STOWN-метка с пустым id; звонок без цифр номера). Для бинарных
+    // транспортов (TCP/HM-10) подобную команду не отправляем — иначе уходит
+    // «88/89 нули номер_замка». HTTP шлёт JSON с реальными полями, его не
+    // касается.
+    if (config.transport != GatewayTransport.http &&
+        identifier.every((b) => b == 0)) {
+      _emit(
+          EventLevel.warning,
+          'Открытие пропущено: нет идентификатора устройства — пустой пакет '
+          '0x${openCmd.toRadixString(16).padLeft(2, '0')} не отправляется.');
+      return;
+    }
     final lock = _lockNumber();
-    final cmd1 = _cmdByte(config.cmd1Hex, 0x01);
-    final cmd2 = _cmdByte(config.cmd2Hex, 0x87);
-    final id1 = config.firstZeroId ? Uint8List(kIdLen) : realId;
-    final pkt1 =
-        StownPacket.build(command: cmd1, identifier: id1, lockNumber: lock);
-    final pkt2 =
-        StownPacket.build(command: cmd2, identifier: realId, lockNumber: lock);
+    final packets = <Uint8List>[];
+    if (prep) {
+      // 1-й пакет — «подготовка», всегда с нулевым идентификатором.
+      final cmd1 = _cmdByte(config.cmd1Hex, 0x01);
+      packets.add(StownPacket.build(
+          command: cmd1, identifier: Uint8List(kIdLen), lockNumber: lock));
+    }
+    packets.add(StownPacket.build(
+        command: openCmd, identifier: identifier, lockNumber: lock));
 
     switch (config.transport) {
       case GatewayTransport.http:
         await _sendHttp(info);
         break;
       case GatewayTransport.tcp:
-        await _sendStownTcp(pkt1, pkt2);
+        await _sendStownTcp(packets);
         break;
       case GatewayTransport.hm10:
-        await _sendStownHm10(pkt1, pkt2);
+        await _sendStownHm10(packets);
         break;
     }
   }
@@ -364,7 +468,18 @@ class GatewayMonitor {
   void _onIncomingCall(String last10) {
     // Шлюз-телефон выделенный: сбрасываем звонок сразу после чтения номера.
     if (config.callHangup) {
-      unawaited(IncomingCall.endCall());
+      unawaited(IncomingCall.endCall().then((status) {
+        if (status == 'ok') {
+          _emit(EventLevel.info, 'Сброс звонка: ok');
+        } else if (status == 'no_permission') {
+          _emit(
+              EventLevel.warning,
+              'Сброс звонка: нет разрешения «Управление вызовами». Выдайте его '
+              'кнопкой «Разрешение на сброс» или в настройках приложения.');
+        } else {
+          _emit(EventLevel.warning, 'Сброс звонка: $status');
+        }
+      }));
     }
 
     final advKey = 'PHONE:$last10';
@@ -375,18 +490,20 @@ class GatewayMonitor {
         break;
       }
     }
-    if (vehicle == null) {
-      _emit(EventLevel.info, 'Звонок не из базы: …$last10');
+    if (_inStartupGrace) {
+      _emit(EventLevel.info, 'Прогрев: открытие по звонку пропущено');
       return;
     }
 
+    // Антидребезг по номеру звонящего (независимо от BLE-канала).
     final now = DateTime.now();
-    final last = _lastTrigger[vehicle.name];
+    final dedupeKey = 'CALL:$last10';
+    final last = _lastTrigger[dedupeKey];
     if (last != null &&
         now.difference(last).inSeconds < config.cooldownSeconds) {
       return;
     }
-    _lastTrigger[vehicle.name] = now;
+    _lastTrigger[dedupeKey] = now;
 
     // Идентификатор пакета (байты 2-8) — номер звонящего в BCD (7 байт, 14 цифр).
     Uint8List? idBcd;
@@ -395,15 +512,30 @@ class GatewayMonitor {
     } catch (_) {
       idBcd = null;
     }
+    final identifier = idBcd ?? Uint8List(kIdLen);
+    final openCmd = _cmdByte(config.cmdCallHex, 0x89);
 
-    _emit(EventLevel.success, 'Открытие (звонок): ${vehicle.name} · …$last10');
-    unawaited(GatewayLogger.instance.event('OPEN_CALL', vehicle.name));
-    _openFor(idOverride: idBcd, info: <String, dynamic>{
-      'vehicle': vehicle.name,
-      'source': 'call',
-      'phone': last10,
-      'timestamp': now.toIso8601String(),
-    });
+    // Номер в базе → два пакета (подготовка + 89 <номер>); не в базе → один
+    // пакет (89 <номер>), решение остаётся за контроллером.
+    if (vehicle != null) {
+      _emit(EventLevel.success, 'Открытие (звонок): ${vehicle.name} · …$last10');
+      unawaited(GatewayLogger.instance.event('OPEN_CALL', vehicle.name));
+    } else {
+      _emit(EventLevel.info, 'Звонок не из базы → 89 …$last10 (один пакет)');
+      unawaited(GatewayLogger.instance.event('OPEN_CALL_UNKNOWN', '…$last10'));
+    }
+
+    _openFor(
+        identifier: identifier,
+        openCmd: openCmd,
+        prep: vehicle != null,
+        info: <String, dynamic>{
+          'vehicle': vehicle?.name,
+          'source': 'call',
+          'inBase': vehicle != null,
+          'phone': last10,
+          'timestamp': now.toIso8601String(),
+        });
   }
 
   /// 7 байт идентификатора для команды: из hex STOWN-ID метки, иначе нули.
@@ -412,6 +544,16 @@ class GatewayMonitor {
     if (stownIdHex == null) return out;
     final clean = stownIdHex.replaceAll(RegExp('[^0-9A-Fa-f]'), '');
     for (var i = 0; i < 7 && i * 2 + 1 < clean.length; i++) {
+      out[i] = int.parse(clean.substring(i * 2, i * 2 + 2), radix: 16);
+    }
+    return out;
+  }
+
+  /// 7 байт идентификатора из MAC-адреса: 6 байт MAC + 1 байт нуля.
+  Uint8List _macBytes(String mac) {
+    final out = Uint8List(7);
+    final clean = mac.replaceAll(RegExp('[^0-9A-Fa-f]'), '');
+    for (var i = 0; i < 6 && i * 2 + 1 < clean.length; i++) {
       out[i] = int.parse(clean.substring(i * 2, i * 2 + 2), radix: 16);
     }
     return out;
@@ -452,10 +594,10 @@ class GatewayMonitor {
   }
 
   // ------------------------------------------------------------------ //
-  // TCP — две STOWN-команды: 0x01, пауза 500 мс, 0x87.
+  // TCP — две STOWN-команды: 0x01, пауза 1 мс, 0x87.
   // ------------------------------------------------------------------ //
 
-  Future<void> _sendStownTcp(Uint8List pkt1, Uint8List pkt2) async {
+  Future<void> _sendStownTcp(List<Uint8List> packets) async {
     final dst = '${config.tcpHost}:${config.tcpPort}';
     Socket? socket;
     try {
@@ -464,13 +606,12 @@ class GatewayMonitor {
         config.tcpPort,
         timeout: const Duration(seconds: 5),
       );
-      socket.add(pkt1);
-      await socket.flush();
-      _emit(EventLevel.success, 'TCP: ${_hb(pkt1)} → $dst');
-      await Future.delayed(const Duration(milliseconds: 500));
-      socket.add(pkt2);
-      await socket.flush();
-      _emit(EventLevel.success, 'TCP: ${_hb(pkt2)} → $dst');
+      for (var i = 0; i < packets.length; i++) {
+        if (i > 0) await Future.delayed(const Duration(milliseconds: 1));
+        socket.add(packets[i]);
+        await socket.flush();
+        _emit(EventLevel.success, 'TCP: ${_hb(packets[i])} → $dst');
+      }
     } on TimeoutException {
       _emit(EventLevel.error,
           'TCP: таймаут подключения к ${config.tcpHost}:${config.tcpPort}');
@@ -486,12 +627,12 @@ class GatewayMonitor {
   }
 
   // ------------------------------------------------------------------ //
-  // HM-10 — постоянное GATT-подключение, запись 0x01, пауза 500 мс, 0x87.
+  // HM-10 — постоянное GATT-подключение, запись 0x01, пауза 1 мс, 0x87.
   // Постоянное подключение надёжнее, чем connect на каждое открытие, и
   // сосуществует со сканированием (не нужно его останавливать).
   // ------------------------------------------------------------------ //
 
-  Future<void> _sendStownHm10(Uint8List pkt1, Uint8List pkt2) async {
+  Future<void> _sendStownHm10(List<Uint8List> packets) async {
     // Android getRemoteDevice требует MAC в ВЕРХНЕМ регистре с двоеточиями.
     final id = config.hm10Device.trim().toUpperCase();
     if (id.isEmpty) {
@@ -505,11 +646,13 @@ class GatewayMonitor {
     }
     try {
       void log(String m) => _emit(EventLevel.info, 'HM-10: $m');
-      await Hm10Sender.instance.writePersistent(id, pkt1, onLog: log);
-      await Future.delayed(const Duration(milliseconds: 500));
-      await Hm10Sender.instance.writePersistent(id, pkt2, onLog: log);
-      _emit(EventLevel.success,
-          'HM-10: ${_hb(pkt1)} и ${_hb(pkt2)} отправлены → $id');
+      final sent = <String>[];
+      for (var i = 0; i < packets.length; i++) {
+        if (i > 0) await Future.delayed(const Duration(milliseconds: 1));
+        await Hm10Sender.instance.writePersistent(id, packets[i], onLog: log);
+        sent.add(_hb(packets[i]));
+      }
+      _emit(EventLevel.success, 'HM-10: ${sent.join(' и ')} отправлены → $id');
     } catch (e) {
       _emit(EventLevel.error, 'HM-10: $e');
     }
@@ -533,26 +676,18 @@ class GatewayMonitor {
   }
 }
 
-/// Коэффициент EMA-сглаживания RSSI (0..1; больше — отзывчивее, меньше — глаже).
-const double _emaAlpha = 0.4;
-
-/// Зона метки в гистерезисе.
-enum _Zone { far, near }
-
-/// Состояние «мёртвой зоны» для одной метки.
-class _TagState {
-  _Zone state = _Zone.far; // старт «армед» — первое приближение откроет
-  DateTime? nearSince; // когда RSSI впервые стал ≥ P_close непрерывно
-  DateTime? farSince; // когда RSSI ≤ P_dist непрерывно
-  DateTime lastSeen = DateTime.now();
-  double? ema; // сглаженный RSSI
-  int lastRssi = -127; // последний сглаженный RSSI (для UI)
-}
-
-/// Снимок живого состояния метки для UI.
+/// Снимок живого состояния авторизованной метки для UI.
 class TagLive {
-  TagLive({required this.zone, required this.rssi, required this.lastSeen});
-  final String zone; // 'near' | 'far'
-  final int rssi;
+  TagLive({
+    required this.zone,
+    required this.rssi,
+    required this.lastSeen,
+    required this.a,
+    required this.b,
+  });
+  final String zone; // далеко | между | близко
+  final int rssi; // последний сырой RSSI
   final DateTime lastSeen;
+  final int a; // счётчик пребывания «близко»
+  final int? b; // счётчик пребывания «далеко» (null — ещё не было «далеко»)
 }

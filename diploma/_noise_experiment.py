@@ -1,4 +1,5 @@
-"""Статистическая оценка устойчивости к шуму: пороговый подход vs траектория.
+"""Статистическая оценка устойчивости к шуму: пороговый подход vs алгоритм
+гистерезиса зон.
 
 Статичная метка на 5 м от считывателя, 60 измерений с шагом 0,5 с (30 с).
 Для каждого сигма — 200 прогонов; считаем долю прогонов с хотя бы одним
@@ -28,7 +29,7 @@ for sigma in (2.0, 4.0, 6.0):
     traj_runs = 0
     for r in range(RUNS):
         rnd = random.Random(1000 + r)
-        an = TrajectoryAnalyzer(grant_distance=2.0, approach_samples=4)
+        an = TrajectoryAnalyzer()
         fires = 0
         granted = False
         for i in range(N_SAMPLES):

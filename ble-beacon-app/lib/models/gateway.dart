@@ -206,21 +206,17 @@ enum GatewayTransport {
 class GatewayConfig {
   GatewayConfig({
     required this.whitelist,
-    // Антидребезг для доступа по звонку (BLE использует КА «мёртвой зоны»).
+    // Антидребезг для доступа по звонку.
     this.cooldownSeconds = 10,
-    // Алгоритм решения для BLE: 'deadZone' (гистерезис) | 'trajectory' (Калман).
-    this.decisionMode = 'deadZone',
-    // Параметры «мёртвой зоны» (гистерезис) для BLE-открытия:
-    this.rssiNear = -60, // P_close: RSSI ≥ этого = «рядом»
-    this.rssiFar = -80, // P_dist: RSSI ≤ этого = «далеко»
-    this.tCloseMs = 1000, // t_close: держаться «рядом» до открытия
-    this.tFarMs = 3000, // t_dist: «далеко»/нет в зоне до перевзвода
-    // Параметры режима «траектория» (Калман + дистанция + тренд):
-    this.grantDistance = 2.0, // радиус зоны доступа, м
-    this.approachSamples = 4, // сколько подряд «приближается» до доступа
-    this.trendEps = 0.2, // порог наклона RSSI, dBm/с
-    this.txPower1m = -59.0, // калиброванный RSSI на 1 м
-    this.pathLossN = 2.5, // показатель затухания среды
+    // Параметры алгоритма доступа по гистерезису зон сигнала (BLE):
+    this.nearRssi = -65, // A: RSSI > этого = «близко»
+    this.farRssi = -85, // B: RSSI < этого = «далеко»
+    this.farHoldX = 3, // X: замеров «далеко» подряд для взвода
+    this.nearHoldY = 3, // Y: замеров «близко» подряд для выдачи доступа
+    this.absenceSeconds = 5, // нет метки в зоне столько секунд → удалить записи
+    this.pollHz = 4, // частота прогона алгоритма по метке, раз/сек (шаг A/B)
+    // Логировать трассу алгоритма по всем меткам в отдельный файл.
+    this.algoLogging = false,
     this.transport = GatewayTransport.http,
     // HTTP
     this.haUrl = 'http://192.168.0.10:8123',
@@ -232,9 +228,11 @@ class GatewayConfig {
     this.hm10Device = '',
     // Общий для TCP и HM-10: номер замка (hex), напр. 7702
     this.lockHex = '7702',
-    // Командные байты пакета (hex). 1-й — «подготовка», 2-й — «открыть».
+    // Командные байты пакета (hex). cmd1 — «подготовка» (1-й пакет);
+    // cmd2 — «открыть» для BLE (MAC/ID метки); cmdCall — «открыть» для звонка.
     this.cmd1Hex = '01',
-    this.cmd2Hex = '87',
+    this.cmd2Hex = '88',
+    this.cmdCallHex = '89',
     // В 1-м пакете идентификатор (байты 2-8) заполнять нулями.
     this.firstZeroId = true,
     // Доступ по звонку (Вариант А): открытие при входящем из базы.
@@ -247,21 +245,19 @@ class GatewayConfig {
   final List<AuthorizedVehicle> whitelist;
   final int cooldownSeconds;
 
-  /// Алгоритм решения: 'deadZone' | 'trajectory'.
-  final String decisionMode;
+  // Алгоритм доступа по гистерезису зон сигнала (BLE)
+  final int nearRssi; // A: rssi > nearRssi → «близко»
+  final int farRssi; // B: rssi < farRssi → «далеко»
+  final int farHoldX; // X: порог удержания «далеко» (взвод)
+  final int nearHoldY; // Y: порог удержания «близко» (выдача)
+  final int absenceSeconds; // метка пропала из зоны → удалить записи
 
-  // «Мёртвая зона» (гистерезис) для BLE-открытия
-  final int rssiNear; // P_close
-  final int rssiFar; // P_dist
-  final int tCloseMs; // t_close
-  final int tFarMs; // t_dist
+  /// Частота опроса меток алгоритмом, раз/сек (Гц). Один «тик» = шаг счётчиков
+  /// A/B; период троттлинга = 1000 / pollHz мс. По умолчанию 4 раз/сек (250 мс).
+  final int pollHz;
 
-  // «Траектория» (Калман + дистанция + тренд)
-  final double grantDistance;
-  final int approachSamples;
-  final double trendEps;
-  final double txPower1m;
-  final double pathLossN;
+  /// Логировать трассу алгоритма по всем меткам в отдельный файл.
+  final bool algoLogging;
 
   // Транспорт
   final GatewayTransport transport;
@@ -282,7 +278,8 @@ class GatewayConfig {
 
   // Командные байты (hex) и режим нулевого идентификатора в 1-м пакете
   final String cmd1Hex;
-  final String cmd2Hex;
+  final String cmd2Hex; // «открыть» для BLE (MAC/ID метки), напр. 88
+  final String cmdCallHex; // «открыть» для доступа по звонку, напр. 89
   final bool firstZeroId;
 
   // Доступ по звонку
@@ -296,16 +293,13 @@ class GatewayConfig {
 
   Map<String, dynamic> toJson() => {
         'cooldownSeconds': cooldownSeconds,
-        'decisionMode': decisionMode,
-        'rssiNear': rssiNear,
-        'rssiFar': rssiFar,
-        'tCloseMs': tCloseMs,
-        'tFarMs': tFarMs,
-        'grantDistance': grantDistance,
-        'approachSamples': approachSamples,
-        'trendEps': trendEps,
-        'txPower1m': txPower1m,
-        'pathLossN': pathLossN,
+        'nearRssi': nearRssi,
+        'farRssi': farRssi,
+        'farHoldX': farHoldX,
+        'nearHoldY': nearHoldY,
+        'absenceSeconds': absenceSeconds,
+        'pollHz': pollHz,
+        'algoLogging': algoLogging,
         'whitelist': whitelist.map((v) => v.toJson()).toList(),
         'transport': transport.name,
         'haUrl': haUrl,
@@ -316,6 +310,7 @@ class GatewayConfig {
         'lockHex': lockHex,
         'cmd1Hex': cmd1Hex,
         'cmd2Hex': cmd2Hex,
+        'cmdCallHex': cmdCallHex,
         'firstZeroId': firstZeroId,
         'callAccessEnabled': callAccessEnabled,
         'callHangup': callHangup,
@@ -353,16 +348,14 @@ class GatewayConfig {
     return GatewayConfig(
       whitelist: whitelist,
       cooldownSeconds: j['cooldownSeconds'] as int? ?? 10,
-      decisionMode: j['decisionMode'] as String? ?? 'deadZone',
-      rssiNear: j['rssiNear'] as int? ?? -60,
-      rssiFar: j['rssiFar'] as int? ?? -80,
-      tCloseMs: j['tCloseMs'] as int? ?? 1000,
-      tFarMs: j['tFarMs'] as int? ?? 3000,
-      grantDistance: (j['grantDistance'] as num?)?.toDouble() ?? 2.0,
-      approachSamples: j['approachSamples'] as int? ?? 4,
-      trendEps: (j['trendEps'] as num?)?.toDouble() ?? 0.2,
-      txPower1m: (j['txPower1m'] as num?)?.toDouble() ?? -59.0,
-      pathLossN: (j['pathLossN'] as num?)?.toDouble() ?? 2.5,
+      // Новые ключи; при их отсутствии берём старые (rssiNear/rssiFar) либо дефолты.
+      nearRssi: j['nearRssi'] as int? ?? j['rssiNear'] as int? ?? -65,
+      farRssi: j['farRssi'] as int? ?? j['rssiFar'] as int? ?? -85,
+      farHoldX: j['farHoldX'] as int? ?? 3,
+      nearHoldY: j['nearHoldY'] as int? ?? 3,
+      absenceSeconds: j['absenceSeconds'] as int? ?? 5,
+      pollHz: j['pollHz'] as int? ?? 4,
+      algoLogging: j['algoLogging'] as bool? ?? false,
       transport: transport,
       haUrl: j['haUrl'] as String? ?? 'http://192.168.0.10:8123',
       webhookId: j['webhookId'] as String? ?? 'gate_open',
@@ -371,7 +364,8 @@ class GatewayConfig {
       hm10Device: j['hm10Device'] as String? ?? '',
       lockHex: j['lockHex'] as String? ?? '7702',
       cmd1Hex: j['cmd1Hex'] as String? ?? '01',
-      cmd2Hex: j['cmd2Hex'] as String? ?? '87',
+      cmd2Hex: j['cmd2Hex'] as String? ?? '88',
+      cmdCallHex: j['cmdCallHex'] as String? ?? '89',
       firstZeroId: j['firstZeroId'] as bool? ?? true,
       callAccessEnabled: j['callAccessEnabled'] as bool? ?? true,
       callHangup: j['callHangup'] as bool? ?? true,
@@ -383,16 +377,13 @@ class GatewayConfig {
   GatewayConfig copyWith({
     List<AuthorizedVehicle>? whitelist,
     int? cooldownSeconds,
-    String? decisionMode,
-    int? rssiNear,
-    int? rssiFar,
-    int? tCloseMs,
-    int? tFarMs,
-    double? grantDistance,
-    int? approachSamples,
-    double? trendEps,
-    double? txPower1m,
-    double? pathLossN,
+    int? nearRssi,
+    int? farRssi,
+    int? farHoldX,
+    int? nearHoldY,
+    int? absenceSeconds,
+    int? pollHz,
+    bool? algoLogging,
     GatewayTransport? transport,
     String? haUrl,
     String? webhookId,
@@ -402,6 +393,7 @@ class GatewayConfig {
     String? lockHex,
     String? cmd1Hex,
     String? cmd2Hex,
+    String? cmdCallHex,
     bool? firstZeroId,
     bool? callAccessEnabled,
     bool? callHangup,
@@ -409,16 +401,13 @@ class GatewayConfig {
       GatewayConfig(
         whitelist: whitelist ?? this.whitelist,
         cooldownSeconds: cooldownSeconds ?? this.cooldownSeconds,
-        decisionMode: decisionMode ?? this.decisionMode,
-        rssiNear: rssiNear ?? this.rssiNear,
-        rssiFar: rssiFar ?? this.rssiFar,
-        tCloseMs: tCloseMs ?? this.tCloseMs,
-        tFarMs: tFarMs ?? this.tFarMs,
-        grantDistance: grantDistance ?? this.grantDistance,
-        approachSamples: approachSamples ?? this.approachSamples,
-        trendEps: trendEps ?? this.trendEps,
-        txPower1m: txPower1m ?? this.txPower1m,
-        pathLossN: pathLossN ?? this.pathLossN,
+        nearRssi: nearRssi ?? this.nearRssi,
+        farRssi: farRssi ?? this.farRssi,
+        farHoldX: farHoldX ?? this.farHoldX,
+        nearHoldY: nearHoldY ?? this.nearHoldY,
+        absenceSeconds: absenceSeconds ?? this.absenceSeconds,
+        pollHz: pollHz ?? this.pollHz,
+        algoLogging: algoLogging ?? this.algoLogging,
         transport: transport ?? this.transport,
         haUrl: haUrl ?? this.haUrl,
         webhookId: webhookId ?? this.webhookId,
@@ -428,6 +417,7 @@ class GatewayConfig {
         lockHex: lockHex ?? this.lockHex,
         cmd1Hex: cmd1Hex ?? this.cmd1Hex,
         cmd2Hex: cmd2Hex ?? this.cmd2Hex,
+        cmdCallHex: cmdCallHex ?? this.cmdCallHex,
         firstZeroId: firstZeroId ?? this.firstZeroId,
         callAccessEnabled: callAccessEnabled ?? this.callAccessEnabled,
         callHangup: callHangup ?? this.callHangup,

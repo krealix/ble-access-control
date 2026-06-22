@@ -4,20 +4,25 @@ import 'dart:math';
 import 'package:path_provider/path_provider.dart';
 
 /// Логирование наблюдений сканера в CSV в отдельной папке `scanner_logs`.
-/// Колонки: timestamp,name,id,rssi,distance_m
+/// Колонки (разделитель «;»): timestamp;name;id;rssi;distance_m
+///   timestamp — локальное время чч:мм:сс.мс;
 ///   distance_m — оценка дистанции по лог-дистанционной модели RSSI.
 ///
 /// Запись по каждой метке троттлится (не чаще раза в [_minIntervalMs]),
 /// чтобы файл не разрастался при частых обновлениях рекламы.
+///
+/// По умолчанию 250 мс — опрос метки 4 раза в секунду: запись по каждой метке
+/// не чаще раза в 250 мс, что даёт стабильную частоту наблюдений.
 class ScannerLogger {
   ScannerLogger._();
   static final ScannerLogger instance = ScannerLogger._();
 
-  // Параметры лог-дистанционной модели (как в режиме «Траектория»).
+  // Параметры лог-дистанционной модели RSSI.
   static const double txPower1m = -59.0;
   static const double pathLossN = 2.5;
 
-  static const int _minIntervalMs = 1000;
+  // Опрос метки 4 раза в секунду (период 250 мс).
+  static const int _minIntervalMs = 250;
 
   IOSink? _sink;
   File? _file;
@@ -34,7 +39,16 @@ class ScannerLogger {
     _file = File('${_dir!.path}/scanner_log.csv');
     final isNew = !await _file!.exists();
     _sink = _file!.openWrite(mode: FileMode.writeOnlyAppend);
-    if (isNew) _sink!.writeln('timestamp,name,id,rssi,distance_m');
+    if (isNew) _sink!.writeln('timestamp;name;id;rssi;distance_m');
+  }
+
+  /// Локальная отметка времени «чч:мм:сс.мс» (миллисекунды нужны при частом
+  /// логировании — иначе несколько замеров склеятся в одну секунду).
+  static String _hms() {
+    final n = DateTime.now();
+    String p2(int v) => v.toString().padLeft(2, '0');
+    return '${p2(n.hour)}:${p2(n.minute)}:${p2(n.second)}'
+        '.${n.millisecond.toString().padLeft(3, '0')}';
   }
 
   /// Оценка дистанции (м) по RSSI: d = 10^((tx - rssi)/(10·n)).
@@ -53,10 +67,10 @@ class ScannerLogger {
     _lastWriteMs[id] = nowMs;
 
     await _open();
-    final ts = DateTime.now().toIso8601String();
+    final ts = _hms();
     final dist = distanceFromRssi(rssi).toStringAsFixed(2);
-    final safeName = name.replaceAll('"', "'");
-    _sink!.writeln('$ts,"$safeName",$id,$rssi,$dist');
+    final safeName = name.replaceAll('"', "'").replaceAll(';', ',');
+    _sink!.writeln('$ts;"$safeName";$id;$rssi;$dist');
   }
 
   Future<String> fileForExport() async {

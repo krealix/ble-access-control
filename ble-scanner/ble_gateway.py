@@ -6,7 +6,7 @@
 - Парсит iBeacon (Apple Manufacturer ID 0x004C) и 10-байтный STOWN-пакет
 - Фильтрует по whitelist (имя + Major + опц. Minor + опц. MAC + опц. STOWN ID)
 - Решение о доступе одним из двух методов (decision_mode):
-    * "trajectory" — анализ траектории RSSI (Калман+дистанция+тренд+FSM), ядро ВКР;
+    * "trajectory" — анализ траектории RSSI (гистерезис зон сигнала), ядро ВКР;
     * "threshold"  — простой порог RSSI + N замеров (базовый метод для сравнения).
 - При разрешении доступа — POST на HA webhook
 - Cooldown per-vehicle чтобы не дёргать ворота повторно
@@ -144,16 +144,16 @@ class GatewayConfig:
     whitelist: list[AuthorizedVehicle] = field(default_factory=list)
 
     # --- Режим принятия решения о доступе ---
-    # "trajectory" — по анализу траектории (Калман+дистанция+тренд+FSM), ядро ВКР;
+    # "trajectory" — по анализу траектории (гистерезис зон сигнала), ядро ВКР;
     # "threshold"  — по простому порогу RSSI + N замеров (для сравнения в главе 2.3).
     decision_mode: str = "trajectory"
 
-    # Параметры анализатора траектории (используются при decision_mode="trajectory")
-    grant_distance: float = 2.0   # радиус зоны доступа, м
-    approach_samples: int = 4     # сколько подряд «приближается» нужно для доступа
-    trend_window: int = 5         # окно (замеров) для оценки тренда
-    trend_eps: float = 0.2        # порог наклона RSSI, dBm/с
-    tx_power_1m: float = TX_POWER_1M   # калиброванный RSSI на 1 м
+    # Параметры алгоритма гистерезиса зон (decision_mode="trajectory")
+    near_rssi: int = -65          # A: порог «близко» (rssi > A)
+    far_rssi: int = -85           # B: порог «далеко» (rssi < B)
+    far_hold_x: int = 3           # X: замеров «далеко» для взвода
+    near_hold_y: int = 3          # Y: замеров «близко» для выдачи
+    tx_power_1m: float = TX_POWER_1M   # калиброванный RSSI на 1 м (для дистанции)
     path_loss_n: float = PATH_LOSS_N   # показатель затухания среды
 
     @property
@@ -179,10 +179,10 @@ class GatewayConfig:
             samples_required=int(data.get("samples_required", 2)),
             whitelist=whitelist,
             decision_mode=data.get("decision_mode", "trajectory"),
-            grant_distance=float(data.get("grant_distance", 2.0)),
-            approach_samples=int(data.get("approach_samples", 4)),
-            trend_window=int(data.get("trend_window", 5)),
-            trend_eps=float(data.get("trend_eps", 0.2)),
+            near_rssi=int(data.get("near_rssi", -65)),
+            far_rssi=int(data.get("far_rssi", -85)),
+            far_hold_x=int(data.get("far_hold_x", 3)),
+            near_hold_y=int(data.get("near_hold_y", 3)),
             tx_power_1m=float(data.get("tx_power_1m", TX_POWER_1M)),
             path_loss_n=float(data.get("path_loss_n", PATH_LOSS_N)),
         )
@@ -372,18 +372,19 @@ class GatewayMonitor:
     def _decide_trajectory(
         self, vehicle, key: str, now: float, major: int, minor: int, rssi: int
     ) -> None:
-        """Ядро ВКР: решение по траектории (Калман + дистанция + тренд + FSM).
+        """Ядро ВКР: решение по траектории — гистерезис зон сигнала.
 
-        Порог RSSI здесь НЕ применяется как фильтр — анализатору нужен полный
-        поток (включая слабые/далёкие замеры) для корректной оценки тренда.
+        Порог RSSI здесь НЕ применяется как одиночный фильтр — алгоритму нужен
+        полный поток (включая слабые/далёкие замеры) для подсчёта удержания в
+        зонах «далеко» и «близко».
         """
         analyzer = self._analyzers.get(key)
         if analyzer is None:
             analyzer = TrajectoryAnalyzer(
-                grant_distance=self.config.grant_distance,
-                approach_samples=self.config.approach_samples,
-                window=self.config.trend_window,
-                trend_eps=self.config.trend_eps,
+                near_rssi=self.config.near_rssi,
+                far_rssi=self.config.far_rssi,
+                far_hold_x=self.config.far_hold_x,
+                near_hold_y=self.config.near_hold_y,
                 tx_power=self.config.tx_power_1m,
                 n=self.config.path_loss_n,
             )
@@ -397,7 +398,8 @@ class GatewayMonitor:
             self._emit(
                 "info",
                 f"{vehicle.name}: {sample.state.value} "
-                f"(d≈{sample.distance:.1f} м, тренд={sample.trend:+.2f} dBm/с)",
+                f"(зона={sample.zone.value}, A={sample.a}, "
+                f"B={'-' if sample.b is None else sample.b})",
             )
 
         if sample.state == Access.GRANTED:
@@ -619,8 +621,8 @@ class GatewayPanel(ctk.CTkFrame):
                               text_color=MUTED)
         if mode == "trajectory":
             self._mode_hint.configure(
-                text="Доступ — по устойчивому приближению метки "
-                     "(Калман + дистанция + тренд). Порог RSSI игнорируется."
+                text="Доступ — по траектории прохождения зон сигнала "
+                     "(гистерезис, удержание «далеко»→«близко»). Порог RSSI игнорируется."
             )
         else:
             self._mode_hint.configure(
@@ -801,12 +803,12 @@ class GatewayPanel(ctk.CTkFrame):
             cooldown_seconds=self._safe_int(self._entry_cooldown.get(), 10),
             samples_required=self._safe_int(self._entry_samples.get(), 2),
             whitelist=list(self._config.whitelist),
-            # Режим решения из переключателя; параметры траектории — из текущего конфига.
+            # Режим решения из переключателя; параметры алгоритма — из текущего конфига.
             decision_mode=self._decision_mode,
-            grant_distance=self._config.grant_distance,
-            approach_samples=self._config.approach_samples,
-            trend_window=self._config.trend_window,
-            trend_eps=self._config.trend_eps,
+            near_rssi=self._config.near_rssi,
+            far_rssi=self._config.far_rssi,
+            far_hold_x=self._config.far_hold_x,
+            near_hold_y=self._config.near_hold_y,
             tx_power_1m=self._config.tx_power_1m,
             path_loss_n=self._config.path_loss_n,
         )

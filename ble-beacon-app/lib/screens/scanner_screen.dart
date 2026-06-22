@@ -118,6 +118,11 @@ class _ScannerScreenState extends State<ScannerScreen> {
   Future<void> _startScan() async {
     try {
       await FlutterBluePlus.startScan(
+        // LowLatency — максимальная скважность скана (приёмы по мере поступления
+        // рекламы). continuousUpdates даёт повторные обновления RSSI (иначе
+        // Android схлопывает дубликаты). Это потолок частоты опроса на стороне
+        // телефона; реальная частота ограничена интервалом рекламы метки.
+        androidScanMode: AndroidScanMode.lowLatency,
         continuousUpdates: true,
         removeIfGone: const Duration(seconds: 10),
       );

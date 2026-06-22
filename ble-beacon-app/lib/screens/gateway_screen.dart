@@ -8,6 +8,7 @@ import 'package:share_plus/share_plus.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../models/gateway.dart';
+import '../services/algo_logger.dart';
 import '../services/beacon_parser.dart';
 import '../services/gateway_foreground.dart';
 import '../services/gateway_logger.dart';
@@ -33,22 +34,17 @@ class _GatewayScreenState extends State<GatewayScreen> {
   bool _running = false;
   bool _loaded = false;
 
-  // Алгоритм определения открытия: 'deadZone' | 'trajectory'
-  String _decisionMode = 'deadZone';
+  // Алгоритм доступа по гистерезису зон сигнала
+  final _nearRssiCtrl = TextEditingController(); // A: порог «близко»
+  final _farRssiCtrl = TextEditingController(); // B: порог «далеко»
+  final _farHoldCtrl = TextEditingController(); // X: замеров «далеко» подряд
+  final _nearHoldCtrl = TextEditingController(); // Y: замеров «близко» подряд
+  final _absenceCtrl = TextEditingController(); // метка пропала из зоны, сек
+  final _pollHzCtrl = TextEditingController(); // частота опроса меток, раз/сек
+  final _cooldownCtrl = TextEditingController(); // антидребезг открытий, сек
 
-  // «Мёртвая зона» (гистерезис) + cooldown для звонков
-  final _rssiNearCtrl = TextEditingController(); // P_close
-  final _rssiFarCtrl = TextEditingController(); // P_dist
-  final _tCloseCtrl = TextEditingController(); // t_close, сек
-  final _tFarCtrl = TextEditingController(); // t_dist, сек
-  final _cooldownCtrl = TextEditingController(); // антидребезг звонков, сек
-
-  // «Траектория» (Калман + лог-дистанция + тренд)
-  final _grantDistCtrl = TextEditingController(); // радиус зоны доступа, м
-  final _approachCtrl = TextEditingController(); // проб «приближается» подряд
-  final _trendEpsCtrl = TextEditingController(); // порог наклона RSSI, dBm/с
-  final _txPowerCtrl = TextEditingController(); // RSSI на 1 м
-  final _pathLossCtrl = TextEditingController(); // показатель затухания n
+  // Логирование работы алгоритма по всем меткам в отдельный файл (тумблер).
+  bool _algoLogging = false;
 
   // HTTP
   final _haUrlCtrl = TextEditingController();
@@ -65,8 +61,9 @@ class _GatewayScreenState extends State<GatewayScreen> {
   final _lockCtrl = TextEditingController();
 
   // Командные байты (hex) и нулевой идентификатор в 1-м пакете
-  final _cmd1Ctrl = TextEditingController();
-  final _cmd2Ctrl = TextEditingController();
+  final _cmd1Ctrl = TextEditingController(); // подготовка (1-й пакет)
+  final _cmd2Ctrl = TextEditingController(); // открыть BLE (MAC/ID метки)
+  final _cmdCallCtrl = TextEditingController(); // открыть по звонку
   bool _firstZeroId = true;
 
   // Доступ по звонку
@@ -95,22 +92,20 @@ class _GatewayScreenState extends State<GatewayScreen> {
     WakelockPlus.disable();
     _haUrlCtrl.dispose();
     _webhookCtrl.dispose();
-    _rssiNearCtrl.dispose();
-    _rssiFarCtrl.dispose();
-    _tCloseCtrl.dispose();
-    _tFarCtrl.dispose();
+    _nearRssiCtrl.dispose();
+    _farRssiCtrl.dispose();
+    _farHoldCtrl.dispose();
+    _nearHoldCtrl.dispose();
+    _absenceCtrl.dispose();
+    _pollHzCtrl.dispose();
     _cooldownCtrl.dispose();
     _tcpHostCtrl.dispose();
     _tcpPortCtrl.dispose();
     _hm10Ctrl.dispose();
     _lockCtrl.dispose();
-    _grantDistCtrl.dispose();
-    _approachCtrl.dispose();
-    _trendEpsCtrl.dispose();
-    _txPowerCtrl.dispose();
-    _pathLossCtrl.dispose();
     _cmd1Ctrl.dispose();
     _cmd2Ctrl.dispose();
+    _cmdCallCtrl.dispose();
     super.dispose();
   }
 
@@ -121,13 +116,14 @@ class _GatewayScreenState extends State<GatewayScreen> {
       _config = cfg;
       _monitor.updateConfig(cfg);
       _transport = cfg.transport;
-      _decisionMode = cfg.decisionMode;
       _haUrlCtrl.text = cfg.haUrl;
       _webhookCtrl.text = cfg.webhookId;
-      _rssiNearCtrl.text = cfg.rssiNear.toString();
-      _rssiFarCtrl.text = cfg.rssiFar.toString();
-      _tCloseCtrl.text = (cfg.tCloseMs ~/ 1000).toString();
-      _tFarCtrl.text = (cfg.tFarMs ~/ 1000).toString();
+      _nearRssiCtrl.text = cfg.nearRssi.toString();
+      _farRssiCtrl.text = cfg.farRssi.toString();
+      _farHoldCtrl.text = cfg.farHoldX.toString();
+      _nearHoldCtrl.text = cfg.nearHoldY.toString();
+      _absenceCtrl.text = cfg.absenceSeconds.toString();
+      _pollHzCtrl.text = cfg.pollHz.toString();
       _cooldownCtrl.text = cfg.cooldownSeconds.toString();
       _tcpHostCtrl.text = cfg.tcpHost;
       _tcpPortCtrl.text = cfg.tcpPort.toString();
@@ -135,30 +131,24 @@ class _GatewayScreenState extends State<GatewayScreen> {
       _lockCtrl.text = cfg.lockHex;
       _cmd1Ctrl.text = cfg.cmd1Hex;
       _cmd2Ctrl.text = cfg.cmd2Hex;
+      _cmdCallCtrl.text = cfg.cmdCallHex;
       _firstZeroId = cfg.firstZeroId;
       _callAccessEnabled = cfg.callAccessEnabled;
       _callHangup = cfg.callHangup;
-      _grantDistCtrl.text = _fmtNum(cfg.grantDistance);
-      _approachCtrl.text = cfg.approachSamples.toString();
-      _trendEpsCtrl.text = _fmtNum(cfg.trendEps);
-      _txPowerCtrl.text = _fmtNum(cfg.txPower1m);
-      _pathLossCtrl.text = _fmtNum(cfg.pathLossN);
+      _algoLogging = cfg.algoLogging;
       _loaded = true;
     });
   }
 
   GatewayConfig _readForm() => _config.copyWith(
-        decisionMode: _decisionMode,
-        rssiNear: int.tryParse(_rssiNearCtrl.text.trim()) ?? -60,
-        rssiFar: int.tryParse(_rssiFarCtrl.text.trim()) ?? -80,
-        tCloseMs: (int.tryParse(_tCloseCtrl.text.trim()) ?? 1) * 1000,
-        tFarMs: (int.tryParse(_tFarCtrl.text.trim()) ?? 3) * 1000,
+        nearRssi: int.tryParse(_nearRssiCtrl.text.trim()) ?? -65,
+        farRssi: int.tryParse(_farRssiCtrl.text.trim()) ?? -85,
+        farHoldX: int.tryParse(_farHoldCtrl.text.trim()) ?? 3,
+        nearHoldY: int.tryParse(_nearHoldCtrl.text.trim()) ?? 3,
+        absenceSeconds: int.tryParse(_absenceCtrl.text.trim()) ?? 5,
+        pollHz: int.tryParse(_pollHzCtrl.text.trim()) ?? 4,
         cooldownSeconds: int.tryParse(_cooldownCtrl.text.trim()) ?? 10,
-        grantDistance: double.tryParse(_grantDistCtrl.text.trim()) ?? 2.0,
-        approachSamples: int.tryParse(_approachCtrl.text.trim()) ?? 4,
-        trendEps: double.tryParse(_trendEpsCtrl.text.trim()) ?? 0.2,
-        txPower1m: double.tryParse(_txPowerCtrl.text.trim()) ?? -59.0,
-        pathLossN: double.tryParse(_pathLossCtrl.text.trim()) ?? 2.5,
+        algoLogging: _algoLogging,
         transport: _transport,
         haUrl: _haUrlCtrl.text.trim(),
         webhookId: _webhookCtrl.text.trim(),
@@ -167,15 +157,13 @@ class _GatewayScreenState extends State<GatewayScreen> {
         hm10Device: _hm10Ctrl.text.trim(),
         lockHex: _lockCtrl.text.trim().isEmpty ? '7702' : _lockCtrl.text.trim(),
         cmd1Hex: _cmd1Ctrl.text.trim().isEmpty ? '01' : _cmd1Ctrl.text.trim(),
-        cmd2Hex: _cmd2Ctrl.text.trim().isEmpty ? '87' : _cmd2Ctrl.text.trim(),
+        cmd2Hex: _cmd2Ctrl.text.trim().isEmpty ? '88' : _cmd2Ctrl.text.trim(),
+        cmdCallHex:
+            _cmdCallCtrl.text.trim().isEmpty ? '89' : _cmdCallCtrl.text.trim(),
         firstZeroId: _firstZeroId,
         callAccessEnabled: _callAccessEnabled,
         callHangup: _callHangup,
       );
-
-  /// Форматирует число без лишнего «.0» (для префилла полей).
-  String _fmtNum(double v) =>
-      v == v.roundToDouble() ? v.toStringAsFixed(0) : v.toString();
 
   Future<void> _saveConfig() async {
     final updated = _readForm();
@@ -272,6 +260,19 @@ class _GatewayScreenState extends State<GatewayScreen> {
   void _snack(String msg) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  /// Запросить разрешение на автосброс звонка из переднего плана. Если оно было
+  /// отклонено «навсегда», системный диалог не появится — открываем настройки.
+  Future<void> _grantHangupPermission() async {
+    final ok = await IncomingCall.requestCallPermissions(withHangup: true);
+    if (!mounted) return;
+    if (ok) {
+      _snack('Разрешение на сброс звонка выдано');
+    } else {
+      _snack('Разрешение не выдано — откройте настройки приложения');
+      await IncomingCall.openAppSettings();
+    }
   }
 
   /// Экспорт CSV-лога проездов/RSSI (поделиться файлом).
@@ -758,7 +759,13 @@ class _GatewayScreenState extends State<GatewayScreen> {
   }
 
   Widget _liveRow(String name, TagLive live, DateTime now) {
-    final near = live.zone == 'near';
+    final near = live.zone == 'близко';
+    final far = live.zone == 'далеко';
+    final zoneColor = near
+        ? AppColors.success
+        : far
+            ? AppColors.onSurfaceMuted
+            : const Color(0xFFFFB74D); // «между» — янтарный
     final ago = now.difference(live.lastSeen).inSeconds;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6),
@@ -769,7 +776,7 @@ class _GatewayScreenState extends State<GatewayScreen> {
             height: 10,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              color: near ? AppColors.success : AppColors.onSurfaceMuted,
+              color: zoneColor,
             ),
           ),
           const SizedBox(width: 10),
@@ -780,12 +787,23 @@ class _GatewayScreenState extends State<GatewayScreen> {
                 style: const TextStyle(
                     color: AppColors.onSurface, fontWeight: FontWeight.w600)),
           ),
-          Text(near ? 'рядом' : 'далеко',
+          Text(live.zone,
               style: TextStyle(
-                  color: near ? AppColors.success : AppColors.onSurfaceMuted,
+                  color: zoneColor,
                   fontSize: 12,
                   fontWeight: FontWeight.w600)),
           const SizedBox(width: 10),
+          // Счётчики алгоритма A/B (близко/далеко).
+          SizedBox(
+            width: 58,
+            child: Text('A${live.a}·B${live.b ?? '–'}',
+                textAlign: TextAlign.end,
+                style: const TextStyle(
+                    color: AppColors.onSurfaceMuted,
+                    fontFamily: 'monospace',
+                    fontSize: 11)),
+          ),
+          const SizedBox(width: 8),
           SizedBox(
             width: 46,
             child: Text('${live.rssi}',
@@ -859,7 +877,7 @@ class _GatewayScreenState extends State<GatewayScreen> {
           const Divider(color: AppColors.divider, height: 1),
           const SizedBox(height: 12),
 
-          // ---- Алгоритм определения открытия (BLE) ----
+          // ---- Алгоритм открытия (BLE): гистерезис зон сигнала ----
           const Text(
             'АЛГОРИТМ ОТКРЫТИЯ (BLE)',
             style: TextStyle(
@@ -869,18 +887,15 @@ class _GatewayScreenState extends State<GatewayScreen> {
               letterSpacing: 1.0,
             ),
           ),
-          const SizedBox(height: 6),
-          _modeSelector(),
+          const SizedBox(height: 10),
+          ..._algoFields(),
           const SizedBox(height: 12),
-          if (_decisionMode == 'trajectory')
-            ..._trajectoryFields()
-          else
-            ..._deadZoneFields(),
-          const SizedBox(height: 12),
-          _textField(_cooldownCtrl, 'Антидребезг звонка, с',
-              hint: 'Мин. интервал между открытиями по входящему звонку.',
-              icon: Icons.call_outlined,
+          _textField(_cooldownCtrl, 'Антидребезг открытий, с',
+              hint: 'Мин. интервал между открытиями одной метки (BLE и звонок).',
+              icon: Icons.timelapse_outlined,
               numeric: true),
+          const SizedBox(height: 8),
+          _algoLoggingTile(),
 
           const SizedBox(height: 8),
           const Divider(color: AppColors.divider, height: 1),
@@ -928,167 +943,151 @@ class _GatewayScreenState extends State<GatewayScreen> {
             ),
             activeThumbColor: AppColors.primary,
           ),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              onPressed: _callHangup ? _grantHangupPermission : null,
+              icon: const Icon(Icons.phone_in_talk, size: 18),
+              label: const Text('Разрешение на сброс'),
+            ),
+          ),
         ],
       ),
     );
   }
 
-  /// Переключатель алгоритма: «Мёртвая зона» ↔ «Траектория».
-  Widget _modeSelector() {
-    Widget tab(String mode, String label, IconData icon) {
-      final selected = _decisionMode == mode;
-      return Expanded(
-        child: GestureDetector(
-          onTap: _running ? null : () => setState(() => _decisionMode = mode),
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 180),
-            margin: const EdgeInsets.all(4),
-            padding: const EdgeInsets.symmetric(vertical: 10),
-            decoration: BoxDecoration(
-              gradient: selected ? primaryGradient : null,
-              borderRadius: BorderRadius.circular(10),
+  /// Поля параметров алгоритма гистерезиса: пороги A/B и счётчики X/Y.
+  List<Widget> _algoFields() => [
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: _textField(
+                _nearRssiCtrl,
+                'RSSI близко (A)',
+                hint: 'rssi > A, напр. -65',
+                numeric: true,
+                allowNegative: true,
+              ),
             ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(icon,
-                    color: selected ? Colors.white : AppColors.onSurfaceMuted,
-                    size: 18),
-                const SizedBox(height: 2),
-                Text(label,
-                    style: TextStyle(
-                      color:
-                          selected ? Colors.white : AppColors.onSurfaceMuted,
-                      fontWeight: FontWeight.w700,
-                      fontSize: 12,
-                    )),
-              ],
+            const SizedBox(width: 8),
+            Expanded(
+              child: _textField(
+                _farRssiCtrl,
+                'RSSI далеко (B)',
+                hint: 'rssi < B, напр. -85',
+                numeric: true,
+                allowNegative: true,
+              ),
             ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: _textField(_nearHoldCtrl, 'Замеров близко (Y)',
+                  hint: 'A > Y → открыть', numeric: true),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: _textField(_farHoldCtrl, 'Замеров далеко (X)',
+                  hint: 'для журнала/ухода', numeric: true),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: _textField(_absenceCtrl, 'Пропажа метки, с',
+                  hint: 'нет метки → сброс счётчиков', numeric: true),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: _textField(_pollHzCtrl, 'Опрос, раз/с',
+                  hint: 'частота, напр. 4', numeric: true),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        const Text(
+          'Гистерезис зон: при устойчивом удержании «близко» (A > Y) выдаётся '
+          'доступ — предварительный уход «далеко» не требуется. Между порогами — '
+          'зона нечувствительности: счётчик «близко» сохраняется и обнуляется '
+          'только при уходе «далеко». Порог «далеко» (X) на выдачу не влияет '
+          '(журнал/индикация ухода). «Опрос» — частота прогона алгоритма по '
+          'метке (раз/с). Фильтр Калмана и сглаживание не используются.',
+          style: TextStyle(
+            color: AppColors.onSurfaceMuted,
+            fontSize: 11,
+            height: 1.4,
           ),
         ),
-      );
-    }
+      ];
 
-    return Container(
-      decoration: BoxDecoration(
-        color: AppColors.surfaceDim,
-        borderRadius: BorderRadius.circular(14),
-      ),
-      padding: const EdgeInsets.all(2),
-      child: Row(
+  /// Тумблер логирования работы алгоритма по всем меткам + экспорт/очистка.
+  Widget _algoLoggingTile() => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          tab('deadZone', 'Мёртвая зона', Icons.adjust),
-          tab('trajectory', 'Траектория', Icons.timeline),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            value: _algoLogging,
+            onChanged: (v) {
+              setState(() => _algoLogging = v);
+              AlgoLogger.instance.enabled = v;
+            },
+            title: const Text('Логировать работу алгоритма',
+                style: TextStyle(color: AppColors.onSurface, fontSize: 14)),
+            subtitle: const Text(
+              'Пишет в отдельный файл (algo_log.csv) трассу по КАЖДОЙ метке в '
+              'эфире: RSSI, зона, счётчики A/B, решение. Можно включать на ходу.',
+              style: TextStyle(color: AppColors.onSurfaceMuted, fontSize: 11),
+            ),
+            activeThumbColor: AppColors.primary,
+          ),
+          Row(
+            children: [
+              TextButton.icon(
+                onPressed: _exportAlgoLog,
+                icon: const Icon(Icons.ios_share, size: 16),
+                label: const Text('Экспорт лога алгоритма'),
+                style: TextButton.styleFrom(foregroundColor: AppColors.primary),
+              ),
+              TextButton.icon(
+                onPressed: _clearAlgoLog,
+                icon: const Icon(Icons.delete_outline, size: 16),
+                label: const Text('Очистить'),
+                style: TextButton.styleFrom(
+                    foregroundColor: AppColors.onSurfaceMuted),
+              ),
+            ],
+          ),
         ],
-      ),
-    );
+      );
+
+  /// Экспорт CSV-лога алгоритма (поделиться файлом).
+  Future<void> _exportAlgoLog() async {
+    try {
+      final size = await AlgoLogger.instance.sizeBytes();
+      if (size <= 60) {
+        _snack('Лог алгоритма пуст — включите логирование');
+        return;
+      }
+      final path = await AlgoLogger.instance.fileForExport();
+      await Share.shareXFiles([XFile(path)], subject: 'Лог алгоритма доступа');
+    } catch (e) {
+      _snack('Экспорт: $e');
+    }
   }
 
-  /// Поля алгоритма «мёртвой зоны» (гистерезис по двум порогам RSSI).
-  List<Widget> _deadZoneFields() => [
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(
-              child: _textField(
-                _rssiNearCtrl,
-                'RSSI рядом',
-                hint: 'P_close, напр. -60',
-                numeric: true,
-                allowNegative: true,
-              ),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: _textField(
-                _rssiFarCtrl,
-                'RSSI далеко',
-                hint: 'P_dist, напр. -80',
-                numeric: true,
-                allowNegative: true,
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 12),
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(
-              child: _textField(_tCloseCtrl, 't рядом, с',
-                  hint: 'держать', numeric: true),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: _textField(_tFarCtrl, 't далеко, с',
-                  hint: 'перевзвод', numeric: true),
-            ),
-          ],
-        ),
-        const SizedBox(height: 8),
-        const Text(
-          'Открытие — когда метка подошла ближе «RSSI рядом» на «t рядом». '
-          'Повторно — только после отдаления за «RSSI далеко» на «t далеко» '
-          'или пропадания из зоны.',
-          style: TextStyle(
-            color: AppColors.onSurfaceMuted,
-            fontSize: 11,
-            height: 1.4,
-          ),
-        ),
-      ];
-
-  /// Поля алгоритма «траектория» (Калман → лог-дистанция → тренд → КА).
-  List<Widget> _trajectoryFields() => [
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(
-              child: _textField(_grantDistCtrl, 'Зона доступа, м',
-                  hint: 'радиус зоны', numeric: true, decimal: true),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: _textField(_approachCtrl, 'Проб подряд',
-                  hint: 'приближается', numeric: true),
-            ),
-          ],
-        ),
-        const SizedBox(height: 12),
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(
-              child: _textField(_trendEpsCtrl, 'Порог тренда',
-                  hint: 'наклон, dBm/с', numeric: true, decimal: true),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: _textField(_txPowerCtrl, 'RSSI на 1 м',
-                  hint: 'калибровка',
-                  numeric: true,
-                  decimal: true,
-                  allowNegative: true),
-            ),
-          ],
-        ),
-        const SizedBox(height: 12),
-        _textField(_pathLossCtrl, 'Затухание n',
-            hint: 'показатель среды, обычно 2..4',
-            numeric: true,
-            decimal: true),
-        const SizedBox(height: 8),
-        const Text(
-          'RSSI сглаживается фильтром Калмана и переводится в дистанцию по '
-          'лог-дистанционной модели. Доступ выдаётся при устойчивом приближении '
-          '(тренд по МНК) и входе в «зону доступа». Ядро методики ВКР.',
-          style: TextStyle(
-            color: AppColors.onSurfaceMuted,
-            fontSize: 11,
-            height: 1.4,
-          ),
-        ),
-      ];
+  Future<void> _clearAlgoLog() async {
+    await AlgoLogger.instance.clear();
+    _snack('Лог алгоритма очищен');
+  }
 
   Widget _transportSelector() {
     Widget tab(GatewayTransport t, String label, IconData icon) {
@@ -1232,32 +1231,31 @@ class _GatewayScreenState extends State<GatewayScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Expanded(
-              child: _textField(_cmd1Ctrl, '1-й байт (hex)',
+              child: _textField(_cmd1Ctrl, 'Подготовка (hex)',
                   hint: 'напр. 01', icon: Icons.looks_one_outlined),
             ),
             const SizedBox(width: 8),
             Expanded(
-              child: _textField(_cmd2Ctrl, '2-й байт (hex)',
-                  hint: 'напр. 87', icon: Icons.looks_two_outlined),
+              child: _textField(_cmd2Ctrl, 'Открыть BLE (hex)',
+                  hint: 'MAC/ID, напр. 88', icon: Icons.bluetooth),
             ),
           ],
         ),
-        const SizedBox(height: 4),
-        SwitchListTile(
-          contentPadding: EdgeInsets.zero,
-          dense: true,
-          value: _firstZeroId,
-          onChanged: _running
-              ? null
-              : (v) => setState(() => _firstZeroId = v),
-          title: const Text('Нули в 1-м пакете',
-              style: TextStyle(color: AppColors.onSurface, fontSize: 14)),
-          subtitle: const Text(
-            'Идентификатор (байты 2-8) первого пакета — нули. Реальный '
-            'идентификатор уходит во втором пакете.',
-            style: TextStyle(color: AppColors.onSurfaceMuted, fontSize: 11),
+        const SizedBox(height: 12),
+        _textField(_cmdCallCtrl, 'Открыть по звонку (hex)',
+            hint: 'Первый байт пакета при доступе по звонку, напр. 89',
+            icon: Icons.call_outlined),
+        const SizedBox(height: 8),
+        const Text(
+          '1-й пакет — «подготовка»: первый байт + нули + номер замка '
+          '(01 00…00 …). 2-й пакет — открытие: для BLE первый байт «Открыть BLE» '
+          'и идентификатор (MAC или ID метки), для звонка — «Открыть по звонку» '
+          'и номер звонящего в BCD.',
+          style: TextStyle(
+            color: AppColors.onSurfaceMuted,
+            fontSize: 11,
+            height: 1.4,
           ),
-          activeThumbColor: AppColors.primary,
         ),
       ];
 

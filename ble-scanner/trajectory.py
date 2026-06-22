@@ -4,14 +4,16 @@
 траектории изменения сигнала BLE-меток».
 
 Идея: решение о доступе принимается НЕ по одному замеру RSSI («сигнал сильный →
-открыть»), а по ТРАЕКТОРИИ изменения сигнала во времени — устройство должно
-совершить устойчивое ПРИБЛИЖЕНИЕ в зону доступа. Это отсекает случайные всплески
-RSSI, статичные далёкие метки и простое «поднесение» чужого сигнала.
+открыть»), а по ТРАЕКТОРИИ прохождения меткой зон сигнала во времени. Метка должна
+сначала устойчиво находиться «далеко», а затем устойчиво войти в зону «близко».
+Это отсекает случайные всплески RSSI, статичные далёкие метки и простое
+«поднесение» чужого сигнала.
 
-Конвейер обработки:
-    RSSI(t)  →  фильтр Калмана (сглаживание)  →  оценка дистанции (log-distance
-    path loss)  →  тренд (линейная регрессия наклона)  →  конечный автомат
-    решения о доступе.
+Алгоритм (гистерезис зон, без фильтра Калмана и сглаживания):
+    каждое измерение RSSI относится к зоне «далеко» (rssi < B), «близко»
+    (rssi > A) или нечувствительности (B ≤ rssi ≤ A); ведутся счётчики времени
+    удержания в зонах; доступ выдаётся при удержании «близко» (A > Y) после
+    взвода «далеко» (B > X), с защёлкой гистерезиса от повторных открытий.
 
 Запуск демонстрации (симуляция прохода метки + график trajectory_demo.png):
     python trajectory.py
@@ -24,7 +26,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 # --------------------------------------------------------------------------- #
-# Модель распространения сигнала: RSSI -> расстояние
+# Модель распространения сигнала: RSSI -> расстояние (для расчёта порогов зон)
 # --------------------------------------------------------------------------- #
 
 TX_POWER_1M = -59.0   # калиброванный RSSI на расстоянии 1 м, dBm
@@ -38,36 +40,64 @@ def rssi_to_distance(rssi: float, tx_power: float = TX_POWER_1M,
 
 
 # --------------------------------------------------------------------------- #
-# Фильтр Калмана (1D) — сглаживание шумного RSSI
+# Зоны сигнала и счётчики удержания
 # --------------------------------------------------------------------------- #
 
 
-class Kalman1D:
-    """Простейший одномерный фильтр Калмана для скалярного RSSI.
+class Zone(str, Enum):
+    FAR = "далеко"
+    BETWEEN = "между"
+    NEAR = "близко"
 
-    q — шум процесса (доверие к модели), r — шум измерения (доверие к датчику).
-    Чем больше r, тем сильнее сглаживание.
+
+class ZoneAccessAlgorithm:
+    """Алгоритм принятия решения о доступе по гистерезису зон сигнала.
+
+    near_rssi (A) — верхний порог: rssi > A => зона «близко»;
+    far_rssi  (B) — нижний порог: rssi < B => зона «далеко»;
+    far_hold_x (X) — удержание «далеко» для взвода (B > X);
+    near_hold_y (Y) — удержание «близко» для выдачи доступа (A > Y).
+
+    Состояние счётчиков ведётся по ключу метки. Возвращается зона, счётчики и
+    признак open — нужно ли на этом измерении предоставить доступ.
     """
 
-    def __init__(self, q: float = 0.05, r: float = 4.0, p: float = 1.0):
-        self.q = q
-        self.r = r
-        self.p = p
-        self.x: float | None = None
+    def __init__(self, near_rssi: int = -65, far_rssi: int = -85,
+                 far_hold_x: int = 3, near_hold_y: int = 3):
+        self.near_rssi = near_rssi
+        self.far_rssi = far_rssi
+        self.far_hold_x = far_hold_x
+        self.near_hold_y = near_hold_y
+        # state[id] = [a, b]; b is None пока метка не была «далеко»
+        self._state: dict[str, list] = {}
 
-    def update(self, z: float) -> float:
-        if self.x is None:
-            self.x = z
-            return self.x
-        self.p += self.q                      # прогноз
-        k = self.p / (self.p + self.r)        # коэффициент Калмана
-        self.x += k * (z - self.x)            # коррекция
-        self.p *= (1.0 - k)
-        return self.x
+    def push(self, tag_id: str, rssi: float) -> tuple[Zone, int, int | None, bool]:
+        st = self._state.setdefault(tag_id, [0, None])  # [a, b]
+        a, b = st
+        opened = False
+        if rssi < self.far_rssi:                         # зона «далеко»
+            zone = Zone.FAR
+            b = (b or 0) + 1
+            a = 0                                        # сброс A только при выходе «далеко»
+        elif rssi > self.near_rssi:                      # зона «близко»
+            zone = Zone.NEAR
+            a += 1                                       # удержание «близко»
+            if a > self.near_hold_y:
+                if b is not None and b > self.far_hold_x:  # был взвод «далеко»
+                    opened = True
+                b = 0                                      # защёлка гистерезиса
+        else:                                            # зона нечувствительности
+            zone = Zone.BETWEEN                           # счётчики без изменений
+        st[0], st[1] = a, b
+        return zone, a, b, opened
+
+    def remove(self, tag_id: str) -> None:
+        """Метка пропала из зоны действия — удаляем её записи."""
+        self._state.pop(tag_id, None)
 
 
 # --------------------------------------------------------------------------- #
-# Состояния доступа и точка траектории
+# Состояния доступа и точка траектории (для журнала/графиков)
 # --------------------------------------------------------------------------- #
 
 
@@ -82,87 +112,58 @@ class Access(str, Enum):
 class Sample:
     t: float            # время, с
     rssi_raw: float     # сырой RSSI, dBm
-    rssi_smooth: float  # сглаженный RSSI, dBm
-    distance: float     # оценка расстояния, м
-    trend: float        # наклон сглаженного RSSI, dBm/с (>0 — приближается)
-    state: Access
+    rssi_smooth: float  # = сырой RSSI (сглаживание не применяется)
+    distance: float     # оценка расстояния, м (по модели затухания)
+    zone: Zone          # зона сигнала на этом измерении
+    a: int              # счётчик удержания «близко»
+    b: int | None       # счётчик удержания «далеко» (None — ещё не было «далеко»)
+    state: Access       # состояние доступа (для визуализации)
 
 
 # --------------------------------------------------------------------------- #
-# Анализатор траектории + конечный автомат решения о доступе
+# Анализатор траектории на основе гистерезиса зон (поток одной метки)
 # --------------------------------------------------------------------------- #
 
 
 class TrajectoryAnalyzer:
-    """Принимает поток (t, rssi) и решает, разрешать ли доступ.
+    """Принимает поток (t, rssi) одной метки и решает, разрешать ли доступ.
 
-    grant_distance   — радиус зоны доступа, м;
-    approach_samples — сколько подряд замеров «приближается» нужно для разрешения;
-    window           — окно (в замерах) для оценки тренда;
-    trend_eps        — порог наклона, dBm/с, выше которого считаем «приближается».
+    Обёртка над ZoneAccessAlgorithm для одной метки: добавляет «защёлку
+    доступа» для непрерывной индикации состояния GRANTED на графиках и в
+    журнале (от момента открытия до ухода метки «далеко»).
     """
 
-    def __init__(self, grant_distance: float = 2.0, approach_samples: int = 4,
-                 window: int = 5, trend_eps: float = 0.2,
+    def __init__(self, near_rssi: int = -65, far_rssi: int = -85,
+                 far_hold_x: int = 3, near_hold_y: int = 3,
                  tx_power: float = TX_POWER_1M, n: float = PATH_LOSS_N):
-        self.grant_distance = grant_distance
-        self.approach_samples = approach_samples
-        self.window = window
-        self.trend_eps = trend_eps
+        self.algo = ZoneAccessAlgorithm(near_rssi, far_rssi, far_hold_x, near_hold_y)
         self.tx_power = tx_power
         self.n = n
-        self.kalman = Kalman1D()
         self.history: list[Sample] = []
-        self._approach_streak = 0
         self._granted = False
 
-    def _trend(self) -> float:
-        """Наклон сглаженного RSSI по последним `window` точкам (МНК)."""
-        pts = self.history[-self.window:]
-        if len(pts) < 2:
-            return 0.0
-        xs = [p.t for p in pts]
-        ys = [p.rssi_smooth for p in pts]
-        mx = sum(xs) / len(xs)
-        my = sum(ys) / len(ys)
-        num = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
-        den = sum((x - mx) ** 2 for x in xs) or 1e-9
-        return num / den
-
     def push(self, t: float, rssi: float) -> Sample:
-        smooth = self.kalman.update(rssi)
-        dist = rssi_to_distance(smooth, self.tx_power, self.n)
-        self.history.append(Sample(t, rssi, smooth, dist, 0.0, Access.FAR))
-        trend = self._trend()
-        self.history[-1].trend = trend
+        zone, a, b, opened = self.algo.push("tag", rssi)
+        dist = rssi_to_distance(rssi, self.tx_power, self.n)
 
-        # Счётчик устойчивого приближения
-        if trend > self.trend_eps:
-            self._approach_streak += 1
-        elif trend < -self.trend_eps:
-            self._approach_streak = 0
-
-        in_zone = dist <= self.grant_distance
-
-        # Разрешаем доступ: метка в зоне И подтверждён устойчивый подход
-        if (not self._granted and in_zone
-                and self._approach_streak >= self.approach_samples):
+        if opened:
             self._granted = True
-        # Гистерезис: сбрасываем, когда метка ушла заметно за пределы зоны
-        if self._granted and dist > self.grant_distance * 1.6:
+        # Снятие индикации доступа при уходе «далеко» (после взвода).
+        if self._granted and zone is Zone.FAR and (b or 0) > self.algo.far_hold_x:
             self._granted = False
 
         if self._granted:
             state = Access.GRANTED
-        elif in_zone or trend > self.trend_eps:
+        elif zone is Zone.NEAR:
             state = Access.APPROACHING
-        elif trend < -self.trend_eps:
-            state = Access.LEAVING
-        else:
+        elif zone is Zone.FAR:
             state = Access.FAR
+        else:
+            state = Access.APPROACHING if a > 0 else Access.FAR
 
-        self.history[-1].state = state
-        return self.history[-1]
+        s = Sample(t, rssi, rssi, dist, zone, a, b, state)
+        self.history.append(s)
+        return s
 
 
 # --------------------------------------------------------------------------- #
@@ -170,24 +171,29 @@ class TrajectoryAnalyzer:
 # --------------------------------------------------------------------------- #
 
 
-def simulate_pass(n_samples: int = 60, dt: float = 0.5, d_start: float = 8.0,
-                  d_min: float = 0.5, noise_db: float = 4.0,
+def simulate_pass(n_samples: int = 60, dt: float = 0.5, d_start: float = 25.0,
+                  d_min: float = 1.0, noise_db: float = 4.0,
                   seed: int = 42) -> list[tuple[float, float]]:
-    """Метка приближается с d_start до d_min и удаляется обратно.
+    """Сценарий прохода: метка приближается из зоны «далеко» (d_start) к точке
+    прохода (d_min), удерживается у неё, затем удаляется обратно.
 
-    Возвращает список (t, rssi_с_шумом) — как будто пришёл со сканера.
+    Три фазы (по трети измерений): подход → удержание → удаление. Возвращает
+    список (t, rssi_с_шумом) — как будто пришёл со сканера.
     """
     rnd = random.Random(seed)
-    half = n_samples // 2
+    third = max(1, n_samples // 3)
     series: list[tuple[float, float]] = []
     for i in range(n_samples):
-        if i <= half:
-            d = d_start + (d_min - d_start) * (i / half)          # подход
-        else:
-            d = d_min + (d_start - d_min) * ((i - half) / half)   # уход
+        if i < third:                                            # подход
+            d = d_start + (d_min - d_start) * (i / third)
+        elif i < 2 * third:                                      # удержание
+            d = d_min
+        else:                                                    # удаление
+            d = d_min + (d_start - d_min) * ((i - 2 * third) /
+                                             (n_samples - 2 * third))
         d = max(d, 0.2)
         true_rssi = TX_POWER_1M - 10.0 * PATH_LOSS_N * math.log10(d)
-        rssi = true_rssi + rnd.gauss(0.0, noise_db)               # шум датчика
+        rssi = true_rssi + rnd.gauss(0.0, noise_db)              # шум датчика
         series.append((i * dt, rssi))
     return series
 
@@ -199,18 +205,17 @@ def simulate_pass(n_samples: int = 60, dt: float = 0.5, d_start: float = 8.0,
 
 def run_demo(out_png: str = "trajectory_demo.png") -> None:
     series = simulate_pass()
-    analyzer = TrajectoryAnalyzer(grant_distance=2.0, approach_samples=4)
+    analyzer = TrajectoryAnalyzer()
     samples = [analyzer.push(t, rssi) for t, rssi in series]
 
-    # Печать ключевых переходов состояния
-    print("t,с   RSSI   сглаж   дист,м  тренд   состояние")
+    print("t,с   RSSI   дист,м  зона     A  B  состояние")
     prev = None
     granted_at = None
     for s in samples:
-        mark = "  <--" if s.state != prev else ""
         if s.state != prev:
-            print(f"{s.t:5.1f} {s.rssi_raw:6.1f} {s.rssi_smooth:7.1f} "
-                  f"{s.distance:6.2f} {s.trend:6.2f}  {s.state.value}{mark}")
+            print(f"{s.t:5.1f} {s.rssi_raw:6.1f} {s.distance:6.2f}  "
+                  f"{s.zone.value:8s} {s.a:2d} {('-' if s.b is None else s.b):>2}"
+                  f"  {s.state.value}")
         if granted_at is None and s.state == Access.GRANTED:
             granted_at = s.t
         prev = s.state
@@ -219,43 +224,32 @@ def run_demo(out_png: str = "trajectory_demo.png") -> None:
     else:
         print("\nДоступ не разрешён")
 
-    _plot(samples, analyzer.grant_distance, out_png)
+    _plot(samples, analyzer.algo, out_png)
     print(f"График сохранён: {out_png}")
 
 
-def _plot(samples: list[Sample], grant_distance: float, out_png: str) -> None:
+def _plot(samples: list[Sample], algo: ZoneAccessAlgorithm, out_png: str) -> None:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     t = [s.t for s in samples]
     raw = [s.rssi_raw for s in samples]
-    smooth = [s.rssi_smooth for s in samples]
-    dist = [s.distance for s in samples]
     granted = [s.t for s in samples if s.state == Access.GRANTED]
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
-
-    ax1.plot(t, raw, ".", color="#9AA7BD", label="RSSI (сырой)", alpha=0.6)
-    ax1.plot(t, smooth, "-", color="#2D8CFF", linewidth=2,
-             label="RSSI (фильтр Калмана)")
+    fig, ax = plt.subplots(figsize=(10, 5.5))
+    ax.plot(t, raw, "-o", color="#2D8CFF", ms=3, lw=1.2, label="RSSI (измеренный)")
+    ax.axhline(algo.near_rssi, color="#22C55E", ls="--",
+               label=f"Порог «близко» A = {algo.near_rssi} dBm")
+    ax.axhline(algo.far_rssi, color="#E07B39", ls="--",
+               label=f"Порог «далеко» B = {algo.far_rssi} dBm")
     if granted:
-        ax1.axvspan(min(granted), max(granted), color="#22C55E", alpha=0.18,
-                    label="Доступ разрешён")
-    ax1.set_ylabel("RSSI, dBm")
-    ax1.legend(loc="lower center", ncol=3, fontsize=9)
-    ax1.grid(True, alpha=0.3)
-
-    ax2.plot(t, dist, "-", color="#E07B39", linewidth=2, label="Оценка расстояния")
-    ax2.axhline(grant_distance, color="#22C55E", linestyle="--",
-                label=f"Зона доступа ≤ {grant_distance:g} м")
-    if granted:
-        ax2.axvspan(min(granted), max(granted), color="#22C55E", alpha=0.18)
-    ax2.set_xlabel("Время, с")
-    ax2.set_ylabel("Расстояние, м")
-    ax2.legend(loc="upper center", ncol=2, fontsize=9)
-    ax2.grid(True, alpha=0.3)
-
+        ax.axvspan(min(granted), max(granted), color="#22C55E", alpha=0.18,
+                   label="Доступ разрешён")
+    ax.set_xlabel("Время, с")
+    ax.set_ylabel("RSSI, dBm")
+    ax.legend(loc="lower center", ncol=2, fontsize=9)
+    ax.grid(True, alpha=0.3)
     fig.tight_layout()
     fig.savefig(out_png, dpi=130)
 

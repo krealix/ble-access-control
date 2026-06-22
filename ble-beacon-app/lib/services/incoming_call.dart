@@ -23,24 +23,40 @@ class IncomingCall {
       .map((e) => normalizePhone('$e'))
       .where((n) => n.isNotEmpty);
 
-  /// Запрос разрешений READ_PHONE_STATE + READ_CALL_LOG (нативно).
-  static Future<void> requestPermissions() async {
+  /// Запрашивает разрешения «телефона» ОДНИМ диалогом: READ_PHONE_STATE,
+  /// READ_CALL_LOG и (если [withHangup]) ANSWER_PHONE_CALLS. Раздельные запросы
+  /// нельзя — система показывает только один диалог за раз и второй отбрасывает.
+  ///
+  /// Возвращает true, если разрешение на сброс звонка реально выдано; при
+  /// [withHangup] == false всегда true (сброс не запрашивался).
+  static Future<bool> requestCallPermissions({bool withHangup = false}) async {
     try {
-      await _methods.invokeMethod('requestCallPermissions');
-    } catch (_) {}
+      final res = await _methods.invokeMethod(
+          'requestCallPermissions', {'withHangup': withHangup});
+      if (!withHangup) return true;
+      return res is Map && res['hangupGranted'] == true;
+    } catch (_) {
+      return false;
+    }
   }
 
-  /// Запрос разрешения ANSWER_PHONE_CALLS — нужно для сброса звонка.
-  static Future<void> requestHangupPermission() async {
+  /// Открыть системный экран настроек приложения — для ручной выдачи
+  /// разрешения, если оно было отклонено «навсегда».
+  static Future<void> openAppSettings() async {
     try {
-      await _methods.invokeMethod('requestHangupPermission');
+      await _methods.invokeMethod('openAppSettings');
     } catch (_) {}
   }
 
   /// Сбросить текущий входящий звонок (TelecomManager.endCall, Android 9+).
-  static Future<void> endCall() async {
+  /// Возвращает статус-строку для диагностики: ok / no_permission /
+  /// api_too_old / no_telecom / endcall_false / error.
+  static Future<String> endCall() async {
     try {
-      await _methods.invokeMethod('endCall');
-    } catch (_) {}
+      final r = await _methods.invokeMethod('endCall');
+      return r?.toString() ?? 'unknown';
+    } catch (e) {
+      return 'error';
+    }
   }
 }
